@@ -1,0 +1,20 @@
+app = "ai-vendbot"
+primary_region = "sjc"  # Or whatever region you're closest to
+
+[env]
+  PORT = "8080"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
+
+  [[services.ports]]
+    handlers = ["http"]
+    port = 80
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
