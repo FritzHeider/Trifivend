@@ -1,4 +1,4 @@
-# SmartVend AI Coldcaller Bot
+# Trifivend AI Coldcaller Bot
 
 A full-stack AI-powered coldcalling system that uses OpenAI GPT-4o, ElevenLabs, Whisper, and Twilio to contact, engage, and log leads automatically.
 
@@ -51,4 +51,4 @@ cd deploy
 ```
 
 ## Authors
-Built by [Fritz] — SmartVend Inc.
+Built by Fritz
