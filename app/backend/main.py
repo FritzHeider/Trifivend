@@ -2,16 +2,16 @@ from fastapi import FastAPI, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from agent.listen import transcribe_audio
-from agent.voicebot import coldcall_lead
+from app.voicebot import coldcall_lead
 from agent.speak import speak_text
-from backend.supabase_logger import log_conversation
+from app.backend.supabase_logger import log_conversation
 import tempfile, shutil, os
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Change in production
+    allow_origins=["*"],  # In production, specify your domain
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -27,16 +27,13 @@ async def transcribe(file: UploadFile = File(...), background_tasks: BackgroundT
         user_input = transcribe_audio(audio_file.read(), 44100)
 
     bot_reply = coldcall_lead([{"role": "user", "content": user_input}])
-    
-    # 🔥 Background voice synthesis (non-blocking)
-    background_tasks.add_task(speak_text, bot_reply)
 
-    # ✅ Log conversation to Supabase
+    # 🔥 Synthesize and log in the background
+    background_tasks.add_task(speak_text, bot_reply)
     background_tasks.add_task(log_conversation, user_input, bot_reply)
 
     return {"transcription": user_input, "response": bot_reply}
 
-# ✅ Public audio fetch route
 @app.get("/audio/response.mp3")
 async def serve_audio():
     file_path = "/tmp/response.mp3"

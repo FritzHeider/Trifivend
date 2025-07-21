@@ -9,8 +9,7 @@ openai
 requests
 
 # Audio recording / playback (for local CLI testing)
-sounddevice
-soundfile
+
 pygame
 
 # Env management
@@ -23,6 +22,5 @@ twilio
 aiofiles
 python-multipart
 sounddevice
-pygame
-requests
-python-dotenv
+pydub
+ffmpeg-python

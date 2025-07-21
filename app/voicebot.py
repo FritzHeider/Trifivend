@@ -1,7 +1,7 @@
 import openai
 import os
-from agent.speak import speak_text
-from backend.supabase_logger import log_conversation, fetch_lead_context
+from app.backend.supabase_logger import log_conversation, fetch_lead_context
+from agent.speak import speak_text  
 from dotenv import load_dotenv
 
 load_dotenv()

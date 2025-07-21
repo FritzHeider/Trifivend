@@ -1,24 +1,26 @@
-# Use slim base Python image
+# Use official slim Python image
 FROM python:3.10-slim
 
 # Set work directory
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y ffmpeg libasound2 && rm -rf /var/lib/apt/lists/*
+# Install OS-level dependencies
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    libsndfile1 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy project files
 COPY . .
 
-# Install pip dependencies
-RUN pip install --upgrade pip && pip install -r requirements.txt
+# Install Python dependencies
+RUN pip install --upgrade pip
+RUN pip install -r requirements.txt
 
-# Set environment variables (override with Fly secrets)
-ENV PYTHONUNBUFFERED=1 \
-    PORT=8080
-
-# Expose port
+# Set environment variable for port
+ENV PORT=8080
 EXPOSE 8080
 
-# Run app with Uvicorn
+# Start FastAPI app
 CMD ["uvicorn", "app.backend.main:app", "--host", "0.0.0.0", "--port", "8080"]
