@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, BackgroundTasks, Request
+from fastapi import FastAPI, UploadFile, File, BackgroundTasks, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from agent.listen import transcribe_audio
@@ -65,15 +65,30 @@ Stay natural and conversational. The objective is to engage interest and move th
 """
 
 @app.get("/mcp/sse")
-async def stream_response(request: Request, lead_name: str, property_type: str, location_area: str, callback_offer: str):
+async def stream_response(
+    request: Request,
+    lead_name: str,
+    property_type: str,
+    location_area: str,
+    callback_offer: str,
+    x_forwarded_for: str = Header(default="")
+):
     prompt_filled = SYSTEM_PROMPT.replace("{{lead_name}}", lead_name)\
                                  .replace("{{property_type}}", property_type)\
                                  .replace("{{location_area}}", location_area)\
                                  .replace("{{callback_offer}}", callback_offer)
 
+    client_ip = x_forwarded_for or request.client.host
+    background_tasks = BackgroundTasks()
+    background_tasks.add_task(
+        log_conversation,
+        f"SSE Request from {client_ip} | lead: {lead_name}, property: {property_type}, area: {location_area}",
+        "[SSE stream initiated]"
+    )
+
     async def event_stream():
         yield "data: Connecting Ava...\n\n"
-        
+
         response = openai.ChatCompletion.create(
             model="gpt-4",
             messages=[
