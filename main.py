@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, BackgroundTasks, Request, Header
+from fastapi import FastAPI, UploadFile, File, BackgroundTasks, Request, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from agent.listen import transcribe_audio
@@ -8,17 +8,20 @@ from app.backend.supabase_logger import log_conversation
 from dotenv import load_dotenv
 import tempfile, shutil, os, openai, asyncio
 
-# Load environment
+# === 🌎 Load Environment ===
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# Initialize app
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+# === 🚀 Initialize FastAPI App ===
 app = FastAPI()
 
-# CORS config
+# === 🔐 CORS Configuration ===
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Update this in prod
+    allow_origins=["*"] if ENVIRONMENT != "production" else [FRONTEND_URL],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -26,22 +29,44 @@ app.add_middleware(
 
 # === 🔊 Transcribe Endpoint ===
 @app.post("/transcribe")
-async def transcribe(file: UploadFile = File(...), background_tasks: BackgroundTasks = BackgroundTasks()):
+async def transcribe(
+    file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = BackgroundTasks()
+):
+    # Validate audio file type
+    if not file.filename.endswith((".wav", ".mp3", ".m4a")):
+        raise HTTPException(status_code=400, detail="Unsupported audio format")
+
+    # Save audio file temporarily
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
         shutil.copyfileobj(file.file, tmp)
         tmp_path = tmp.name
 
-    with open(tmp_path, "rb") as audio_file:
-        user_input = transcribe_audio(audio_file.read(), 44100)
+    try:
+        # Transcribe audio
+        with open(tmp_path, "rb") as audio_file:
+            user_input = transcribe_audio(audio_file.read(), 44100)
 
-    bot_reply = coldcall_lead([{"role": "user", "content": user_input}])
+        # Get GPT response
+        bot_reply = coldcall_lead([{"role": "user", "content": user_input}])
 
-    background_tasks.add_task(speak_text, bot_reply)
-    background_tasks.add_task(log_conversation, user_input, bot_reply)
+        # Background tasks
+        background_tasks.add_task(speak_text, bot_reply)
+        background_tasks.add_task(log_conversation, user_input, bot_reply)
 
-    return {"transcription": user_input, "response": bot_reply}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
 
-# === 🔊 Serve MP3 Response ===
+    finally:
+        os.remove(tmp_path)
+
+    return {
+        "transcription": user_input,
+        "response": bot_reply,
+        "audio_url": "/audio/response.mp3"
+    }
+
+# === 🔉 Serve Generated MP3 Audio ===
 @app.get("/audio/response.mp3")
 async def serve_audio():
     file_path = "/tmp/response.mp3"
@@ -49,7 +74,7 @@ async def serve_audio():
         return {"error": "No audio available"}
     return FileResponse(file_path, media_type="audio/mpeg")
 
-# === 🔁 MCP SSE Endpoint for ElevenLabs ===
+# === 🔁 MCP SSE Endpoint for ElevenLabs GPT Call Script ===
 SYSTEM_PROMPT = """
 You are a professional AI voice agent named Ava. You are calling on behalf of Trifivend to introduce a luxury AI vending machine solution to {{lead_name}}, a property manager of a {{property_type}} in {{location_area}}.
 
@@ -89,20 +114,24 @@ async def stream_response(
     async def event_stream():
         yield "data: Connecting Ava...\n\n"
 
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": prompt_filled},
-                {"role": "user", "content": f"Hi {lead_name}, this is Ava calling from Trifivend."}
-            ],
-            stream=True
-        )
+        try:
+            response = openai.ChatCompletion.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": prompt_filled},
+                    {"role": "user", "content": f"Hi {lead_name}, this is Ava calling from Trifivend."}
+                ],
+                stream=True
+            )
 
-        for chunk in response:
-            if "choices" in chunk and len(chunk["choices"]) > 0:
-                delta = chunk["choices"][0]["delta"].get("content")
-                if delta:
-                    yield f"data: {delta}\n\n"
+            for chunk in response:
+                if "choices" in chunk and len(chunk["choices"]) > 0:
+                    delta = chunk["choices"][0].get("delta", {}).get("content")
+                    if delta:
+                        yield f"data: {delta}\n\n"
+        except Exception as e:
+            yield f"data: [Error] {str(e)}\n\n"
+
         yield "data: [END]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

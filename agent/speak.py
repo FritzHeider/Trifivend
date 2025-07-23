@@ -1,32 +1,28 @@
 import os
 import requests
 
-ELEVEN_API_KEY = os.getenv("ELEVEN_API_KEY")
-VOICE_ID = os.getenv("ELEVEN_VOICE_ID", "Rachel")  # or use your custom voice ID
+def speak_text(text: str):
+    voice_id = os.getenv("ELEVEN_VOICE_ID", "Rachel")
+    eleven_key = os.getenv("ELEVEN_API_KEY")
 
-def speak_text(text: str) -> bytes:
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}"
-
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     headers = {
-        "xi-api-key": ELEVEN_API_KEY,
+        "xi-api-key": eleven_key,
         "Content-Type": "application/json"
     }
-
-    payload = {
+    data = {
         "text": text,
-        "model_id": "eleven_monolingual_v1",
         "voice_settings": {
             "stability": 0.4,
-            "similarity_boost": 0.75
+            "similarity_boost": 0.7
         }
     }
 
-    response = requests.post(url, headers=headers, json=payload)
-    response.raise_for_status()
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"ElevenLabs TTS failed: {str(e)}")
 
-    # Save response to a predictable file for Twilio to fetch
-    mp3_path = "/tmp/response.mp3"
-    with open(mp3_path, "wb") as f:
+    with open("/tmp/response.mp3", "wb") as f:
         f.write(response.content)
-
-    return response.content  # Optional: return raw bytes if needed
