@@ -1,7 +1,24 @@
+"""Utility for converting text to speech using ElevenLabs."""
+
 import os
 import requests
 
-def speak_text(text: str):
+def speak_text(text: str, output_path: str = "/tmp/response.mp3") -> str:
+    """Convert ``text`` to speech and save it to ``output_path``.
+
+    Parameters
+    ----------
+    text:
+        The text to convert to speech.
+    output_path:
+        Where the resulting MP3 should be written. Defaults to ``/tmp/response.mp3``.
+
+    Returns
+    -------
+    str
+        The path to the generated audio file.
+    """
+
     voice_id = os.getenv("ELEVEN_VOICE_ID", "Rachel")
     eleven_key = os.getenv("ELEVEN_API_KEY")
 
@@ -22,7 +39,9 @@ def speak_text(text: str):
         response = requests.post(url, headers=headers, json=data)
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
-        raise RuntimeError(f"ElevenLabs TTS failed: {str(e)}")
+        raise RuntimeError(f"ElevenLabs TTS failed: {str(e)}") from e
 
-    with open("/tmp/response.mp3", "wb") as f:
+    with open(output_path, "wb") as f:
         f.write(response.content)
+
+    return output_path
