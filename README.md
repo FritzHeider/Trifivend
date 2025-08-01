@@ -27,26 +27,18 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-4. Start backend:
+4. Start the API server:
 ```bash
-cd app/backend
 uvicorn main:app --reload
 ```
 
-5. Open simulator:
-```bash
-cd ../frontend
-open index.html
-```
-
-6. Trigger outbound coldcalls:
+5. Trigger outbound coldcalls:
 ```bash
 python twilio/outbound_call.py
 ```
 
 ## Deploy to Fly.io
 ```bash
-cd deploy
 ./deploy.sh
 ```
 

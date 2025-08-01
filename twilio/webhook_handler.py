@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import Response
-from backend.speak import speak_text
-from agent.voicebot import coldcall_lead
+from agent.speak import speak_text
+from app.voicebot import coldcall_lead
 import os
 
 app = FastAPI()
@@ -35,3 +35,4 @@ async def twilio_voice(SpeechResult: str = Form(None)):
         '''
 
     return Response(content=twiml.strip(), media_type="application/xml")
+

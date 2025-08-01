@@ -13,10 +13,12 @@ TWILIO_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 
 client = Client(TWILIO_SID, TWILIO_TOKEN)
 
+voice_url = os.getenv("VOICE_WEBHOOK_URL")
+
 call = client.calls.create(
     to=to_number,
     from_=from_number,
-    url="https://your-app.fly.dev/twilio-voice",  # 🔁 Starts the AI loop webhook
+    url=voice_url,  # 🔁 Starts the AI loop webhook
     method="POST"  # Required for <Gather> to POST back
 )
 
