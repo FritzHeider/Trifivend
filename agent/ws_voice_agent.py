@@ -4,6 +4,8 @@ import json
 import httpx
 from fastapi import WebSocket, WebSocketDisconnect
 
+openai_model = os.getenv("OPENAI_MODEL", "gpt-4")
+
 voice_id = os.getenv("ELEVEN_VOICE_ID", "Rachel")
 eleven_key = os.getenv("ELEVEN_API_KEY")
 
@@ -32,7 +34,7 @@ async def gpt_to_tts_stream(websocket: WebSocket, system_prompt: str, user_messa
 
     try:
         response = openai.ChatCompletion.create(
-            model="gpt-4",
+            model=openai_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message}

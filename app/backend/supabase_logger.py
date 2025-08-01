@@ -1,8 +1,12 @@
+"""Utility to log conversations to Supabase."""
+
 import os
 import httpx
 from datetime import datetime
 
-def log_conversation(user_input: str, bot_reply: str):
+
+def log_conversation(user_input: str, bot_reply: str) -> None:
+    """Send the conversation details to Supabase if credentials are set."""
     supabase_url = os.getenv("SUPABASE_URL")
     supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
 

@@ -11,6 +11,7 @@ import tempfile, shutil, os, openai, asyncio
 # === 🌎 Load Environment ===
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4")
 
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
@@ -116,7 +117,7 @@ async def stream_response(
 
         try:
             response = openai.ChatCompletion.create(
-                model="gpt-4",
+                model=OPENAI_MODEL,
                 messages=[
                     {"role": "system", "content": prompt_filled},
                     {"role": "user", "content": f"Hi {lead_name}, this is Ava calling from Trifivend."}
