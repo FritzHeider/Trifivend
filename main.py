@@ -4,9 +4,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from agent.listen import transcribe_audio
 from app.voicebot import coldcall_lead
 from agent.speak import speak_text
-from app.backend.supabase_logger import log_conversation
+from app.backend.supabase_logger import ConversationLog, log_conversation
 from dotenv import load_dotenv
-import tempfile, shutil, os, openai, asyncio
+import tempfile, shutil, os, openai
 
 # === 🌎 Load Environment ===
 load_dotenv()
@@ -53,7 +53,10 @@ async def transcribe(
 
         # Background tasks
         background_tasks.add_task(speak_text, bot_reply)
-        background_tasks.add_task(log_conversation, user_input, bot_reply)
+        background_tasks.add_task(
+            log_conversation,
+            ConversationLog(user_input=user_input, bot_reply=bot_reply),
+        )
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
@@ -106,11 +109,14 @@ async def stream_response(
 
     client_ip = x_forwarded_for or request.client.host
     background_tasks = BackgroundTasks()
-    background_tasks.add_task(
-        log_conversation,
-        f"SSE Request from {client_ip} | lead: {lead_name}, property: {property_type}, area: {location_area}",
-        "[SSE stream initiated]"
+    log_entry = ConversationLog(
+        user_input=(
+            f"SSE Request from {client_ip} | lead: {lead_name}, property: "
+            f"{property_type}, area: {location_area}"
+        ),
+        bot_reply="[SSE stream initiated]",
     )
+    background_tasks.add_task(log_conversation, log_entry)
 
     async def event_stream():
         yield "data: Connecting Ava...\n\n"
@@ -135,4 +141,6 @@ async def stream_response(
 
         yield "data: [END]\n\n"
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_stream(), media_type="text/event-stream", background=background_tasks
+    )
