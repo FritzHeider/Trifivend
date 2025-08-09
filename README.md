@@ -91,8 +91,38 @@ With the backend running and `VOICE_WEBHOOK_URL` pointing to it, initiate a call
 python twilio/outbound_call.py
 ```
 
-Twilio will dial the lead and POST to `/twilio-voice`, which starts the GPT-4o voice
-loop.
+## Making Cold Calls for Vending Machine Leads
+
+To launch the dialer for your vending machine business, follow these steps:
+
+1. **Install dependencies** – create and activate a virtual environment, then install the required packages:
+
+   ```bash
+   python -m venv venv && source venv/bin/activate
+   pip install -r requirements.txt
+   ```
+
+2. **Configure environment variables** – copy the example file and populate it with your API keys and phone numbers:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   Important variables include `OPENAI_API_KEY`, `ELEVEN_API_KEY`, `TWILIO_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_NUMBER`, `LEAD_PHONE`, and `VOICE_WEBHOOK_URL`.
+
+3. **Start the backend server**:
+
+   ```bash
+   ./run_dev.sh
+   ```
+
+4. **Initiate outbound cold calls** using the Twilio helper script:
+
+   ```bash
+   python twilio/outbound_call.py
+   ```
+
+
 
 ## Deploy to Fly.io
 
