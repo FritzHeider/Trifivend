@@ -1,8 +1,7 @@
-from fastapi import FastAPI, Request, Form
+from fastapi import FastAPI, Form
 from fastapi.responses import Response
-from backend.speak import speak_text
+from agent.speak import speak_text
 from agent.voicebot import coldcall_lead
-import os
 
 app = FastAPI()
 

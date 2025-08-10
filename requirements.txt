@@ -24,3 +24,8 @@ python-multipart
 sounddevice
 pydub
 ffmpeg-python
+
+# HTTP client and testing
+httpx
+pytest
+pytest-asyncio
