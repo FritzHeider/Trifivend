@@ -1,10 +1,10 @@
 import os
-import openai
-import json
+from openai import AsyncOpenAI
 import httpx
 from fastapi import WebSocket, WebSocketDisconnect
 
 openai_model = os.getenv("OPENAI_MODEL", "gpt-4")
+openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 voice_id = os.getenv("ELEVEN_VOICE_ID", "Rachel")
 eleven_key = os.getenv("ELEVEN_API_KEY")
@@ -33,22 +33,23 @@ async def gpt_to_tts_stream(websocket: WebSocket, system_prompt: str, user_messa
                 await websocket.send_text(f"[ERROR] TTS failed: {str(e)}")
 
     try:
-        response = openai.ChatCompletion.create(
+        response = await openai_client.chat.completions.create(
             model=openai_model,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message}
+                {"role": "user", "content": user_message},
             ],
-            stream=True
+            stream=True,
         )
 
-        for chunk in response:
-            delta = chunk["choices"][0].get("delta", {}).get("content")
-            if delta:
-                buffer += delta
-                if "." in buffer or len(buffer) > 300:
-                    sentence, buffer = buffer.strip(), ""
-                    await stream_tts(sentence)
+        async for chunk in response:
+            if chunk.choices and len(chunk.choices) > 0:
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    buffer += delta
+                    if "." in buffer or len(buffer) > 300:
+                        sentence, buffer = buffer.strip(), ""
+                        await stream_tts(sentence)
 
         if buffer:
             await stream_tts(buffer)
