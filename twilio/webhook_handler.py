@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Form
 from fastapi.responses import Response
 from agent.speak import speak_text
-from agent.voicebot import coldcall_lead
+from app.voicebot import coldcall_lead
 
 app = FastAPI()
 
