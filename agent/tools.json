@@ -26,7 +26,7 @@
   },
   {
     "name": "send_brochure",
-    "description": "Sends a SmartVend brochure to the lead's email address.",
+    "description": "Sends a Trifivend brochure to the lead's email address.",
     "parameters": {
       "type": "object",
       "properties": {
