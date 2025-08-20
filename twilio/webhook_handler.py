@@ -30,7 +30,7 @@ async def twilio_voice(SpeechResult: str = Form(None)):
         # Initial greeting or re-entry point
         twiml = '''
             <Response>
-                <Say>Hi, this is Taylor from SmartVend. I wanted to quickly ask about your vending machine setup. Are you the right person to speak with?</Say>
+                <Say>Hi, this is Ava from Trifivend. I wanted to quickly ask about your vending machine setup. Are you the right person to speak with?</Say>
                 <Gather input="speech" action="/twilio-voice" method="POST" timeout="5" speechTimeout="auto">
                     <Say>I'm listening...</Say>
                 </Gather>

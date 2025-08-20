@@ -1,6 +1,6 @@
 # Trifivend AI Coldcaller Bot
 
-A full-stack AI-powered coldcalling system that uses OpenAI GPT-4o, ElevenLabs, Whisper, and Twilio to contact, engage, and log leads automatically.
+ A full-stack AI-powered coldcalling system featuring Ava from Trifivend. It uses OpenAI GPT-4o, ElevenLabs, Whisper, and Twilio to contact, engage, and log leads automatically.
 
 ## Features
 - 🧠 GPT-4o logic for intelligent calling and responses
