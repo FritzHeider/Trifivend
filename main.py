@@ -1,16 +1,18 @@
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, Request, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.concurrency import run_in_threadpool
 from agent.listen import transcribe_audio
 from app.voicebot import coldcall_lead
 from agent.speak import speak_text
 from app.backend.supabase_logger import ConversationLog, log_conversation
 from dotenv import load_dotenv
-import tempfile, shutil, os, openai
+import tempfile, shutil, os
+from openai import AsyncOpenAI
 
 # === 🌎 Load Environment ===
 load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
+openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4")
 
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
@@ -46,15 +48,23 @@ async def transcribe(
     try:
         # Transcribe audio
         with open(tmp_path, "rb") as audio_file:
-            user_input = transcribe_audio(audio_file.read(), 44100)
+            user_input = await run_in_threadpool(transcribe_audio, audio_file.read(), 44100)
 
         # Get GPT response
-        bot_reply = coldcall_lead([{"role": "user", "content": user_input}])
+        bot_reply = await run_in_threadpool(
+            coldcall_lead, [{"role": "user", "content": user_input}]
+        )
 
         # Background tasks
-        background_tasks.add_task(speak_text, bot_reply)
+        async def speak_async(text: str) -> None:
+            await run_in_threadpool(speak_text, text)
+
+        async def log_async(entry: ConversationLog) -> None:
+            await run_in_threadpool(log_conversation, entry)
+
+        background_tasks.add_task(speak_async, bot_reply)
         background_tasks.add_task(
-            log_conversation,
+            log_async,
             ConversationLog(user_input=user_input, bot_reply=bot_reply),
         )
 
@@ -122,18 +132,21 @@ async def stream_response(
         yield "data: Connecting Ava...\n\n"
 
         try:
-            response = openai.ChatCompletion.create(
+            response = await openai_client.chat.completions.create(
                 model=OPENAI_MODEL,
                 messages=[
                     {"role": "system", "content": prompt_filled},
-                    {"role": "user", "content": f"Hi {lead_name}, this is Ava calling from Trifivend."}
+                    {
+                        "role": "user",
+                        "content": f"Hi {lead_name}, this is Ava calling from Trifivend.",
+                    },
                 ],
-                stream=True
+                stream=True,
             )
 
-            for chunk in response:
-                if "choices" in chunk and len(chunk["choices"]) > 0:
-                    delta = chunk["choices"][0].get("delta", {}).get("content")
+            async for chunk in response:
+                if chunk.choices and len(chunk.choices) > 0:
+                    delta = chunk.choices[0].delta.content
                     if delta:
                         yield f"data: {delta}\n\n"
         except Exception as e:
