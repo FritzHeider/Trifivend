@@ -1,7 +1,10 @@
+import os
 from fastapi import FastAPI, Form
 from fastapi.responses import Response
 from agent.speak import speak_text
 from agent.voicebot import coldcall_lead
+
+APP_BASE_URL = os.getenv("APP_BASE_URL", "https://your-app.fly.dev")
 
 app = FastAPI()
 
@@ -14,9 +17,10 @@ async def twilio_voice(SpeechResult: str = Form(None)):
         gpt_reply = coldcall_lead([{"role": "user", "content": SpeechResult}])
         speak_text(gpt_reply)  # Saves to /tmp/response.mp3
 
+        play_url = f"{APP_BASE_URL}/audio/response.mp3"
         twiml = f'''
             <Response>
-                <Play>https://your-app.fly.dev/audio/response.mp3</Play>
+                <Play>{play_url}</Play>
                 <Gather input="speech" action="/twilio-voice" method="POST" timeout="5" speechTimeout="auto">
                     <Say>...</Say>
                 </Gather>
