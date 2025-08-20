@@ -56,6 +56,7 @@ Key variables and what they are for:
   **Account > Keys & Credentials**.
 - `TWILIO_NUMBER` – the Twilio phone number making calls.
 - `LEAD_PHONE` – the phone number to dial (E.164 format, e.g. `+15551234567`).
+- `APP_BASE_URL` – base URL of your deployed app used for serving audio files.
 - `VOICE_WEBHOOK_URL` – public URL for the bot's voice webhook. When running locally
   you can tunnel your dev server with `ngrok http 8080` and set this to
   `https://<ngrok-id>.ngrok.io/twilio-voice`. If deployed on Fly, use the Fly domain
@@ -108,7 +109,7 @@ To launch the dialer for your vending machine business, follow these steps:
    cp .env.example .env
    ```
 
-   Important variables include `OPENAI_API_KEY`, `ELEVEN_API_KEY`, `TWILIO_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_NUMBER`, `LEAD_PHONE`, and `VOICE_WEBHOOK_URL`.
+   Important variables include `OPENAI_API_KEY`, `ELEVEN_API_KEY`, `TWILIO_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_NUMBER`, `LEAD_PHONE`, `APP_BASE_URL`, and `VOICE_WEBHOOK_URL`.
 
 3. **Start the backend server**:
 
