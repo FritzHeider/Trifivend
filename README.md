@@ -74,7 +74,17 @@ calls. Launch it with:
 The server listens on `http://localhost:8080`. Ensure it is reachable from the public
 internet at the URL specified by `VOICE_WEBHOOK_URL`.
 
-### 4. (Optional) Open the web simulator
+### 4. Run the Streamlit interface
+
+Launch an interactive UI that supports text input, audio recording or upload, and streams AI replies:
+
+```bash
+streamlit run ui/streamlit_app.py
+```
+
+The app posts your message to the `/transcribe` endpoint, streams incremental updates from `/mcp/sse`, plays the generated audio reply, and keeps a timestamped conversation history in the sidebar.
+
+### 5. (Optional) Open the web simulator
 
 There is a simple frontend for local testing:
 
@@ -83,7 +93,7 @@ cd ../frontend
 open index.html
 ```
 
-### 5. Place an outbound call
+### 6. Place an outbound call
 
 With the backend running and `VOICE_WEBHOOK_URL` pointing to it, initiate a call to
 `LEAD_PHONE`:
