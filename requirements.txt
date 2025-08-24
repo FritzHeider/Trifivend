@@ -29,3 +29,6 @@ ffmpeg-python
 httpx
 pytest
 pytest-asyncio
+
+# Streamlit UI
+streamlit
