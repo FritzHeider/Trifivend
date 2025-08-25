@@ -52,7 +52,7 @@ Key variables and what they are for:
 - `OPENAI_MODEL` – model to use (default `gpt-4`).
 - `ELEVEN_API_KEY` – ElevenLabs API key for TTS.
 - `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` – optional Supabase logging.
-- `TWILIO_SID` and `TWILIO_AUTH_TOKEN` – found in the Twilio console under
+- `TWILIO_ACCOUNT_SID` and `TWILIO_AUTH_TOKEN` – found in the Twilio console under
   **Account > Keys & Credentials**.
 - `TWILIO_NUMBER` – the Twilio phone number making calls.
 - `LEAD_PHONE` – the phone number to dial (E.164 format, e.g. `+15551234567`).
@@ -119,7 +119,7 @@ To launch the dialer for your vending machine business, follow these steps:
    cp .env.example .env
    ```
 
-   Important variables include `OPENAI_API_KEY`, `ELEVEN_API_KEY`, `TWILIO_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_NUMBER`, `LEAD_PHONE`, `APP_BASE_URL`, and `VOICE_WEBHOOK_URL`.
+   Important variables include `OPENAI_API_KEY`, `ELEVEN_API_KEY`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_NUMBER`, `LEAD_PHONE`, `APP_BASE_URL`, and `VOICE_WEBHOOK_URL`.
 
 3. **Start the backend server**:
 
