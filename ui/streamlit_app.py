@@ -3,6 +3,13 @@ from datetime import datetime
 import requests
 import streamlit as st
 
+from twilio.outbound_call import (
+    cancel_call,
+    end_call,
+    get_call_status,
+    initiate_call,
+)
+
 API_BASE = "http://localhost:8080"
 
 st.set_page_config(page_title="Trifivend Chat")
@@ -107,3 +114,46 @@ if st.button("Start SSE Stream"):
                 "bot": collected,
             }
         )
+
+
+st.subheader("Call Lead via Twilio")
+if "call_sid" not in st.session_state:
+    st.session_state.call_sid = None
+if "call_status" not in st.session_state:
+    st.session_state.call_status = None
+
+lead_phone = st.text_input("Lead phone number", key="lead_phone")
+
+if st.button("Call Lead"):
+    if lead_phone:
+        try:
+            sid, status = initiate_call(lead_phone)
+        except Exception as exc:
+            st.error(f"Failed to initiate call: {exc}")
+        else:
+            st.session_state.call_sid = sid
+            st.session_state.call_status = status
+            st.success(f"Call started. SID: {sid}. Status: {status}")
+    else:
+        st.warning("Please enter a phone number")
+
+if st.session_state.call_sid:
+    current = get_call_status(st.session_state.call_sid)
+    st.info(
+        f"Current call SID: {st.session_state.call_sid}. Status: {current}"
+    )
+    col1, col2 = st.columns(2)
+    if col1.button("Cancel Call"):
+        try:
+            _, status = cancel_call(st.session_state.call_sid)
+            st.session_state.call_status = status
+            st.success(f"Call canceled. Status: {status}")
+        except Exception as exc:
+            st.error(f"Failed to cancel call: {exc}")
+    if col2.button("End Call"):
+        try:
+            _, status = end_call(st.session_state.call_sid)
+            st.session_state.call_status = status
+            st.success(f"Call ended. Status: {status}")
+        except Exception as exc:
+            st.error(f"Failed to end call: {exc}")
