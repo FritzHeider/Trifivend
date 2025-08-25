@@ -1,15 +1,10 @@
 from datetime import datetime
+import os
 import requests
 import streamlit as st
 
-from twilio.outbound_call import (
-    cancel_call,
-    end_call,
-    get_call_status,
-    initiate_call,
-)
-
-API_BASE = "http://localhost:8080"
+# Backend URL hosted on Fly.io
+BACKEND_URL = os.getenv("BACKEND_URL", "https://ai-vendbot.fly.dev")
 
 st.set_page_config(page_title="Trifivend Chat")
 st.title("Trifivend Streamlit Interface")
@@ -72,7 +67,7 @@ if st.button("Send", key="send_btn"):
 
     files = {"file": (filename, file_bytes, mime)}
     try:
-        resp = requests.post(f"{API_BASE}/transcribe", files=files, timeout=60)
+        resp = requests.post(f"{BACKEND_URL}/transcribe", files=files, timeout=60)
         resp.raise_for_status()
     except Exception as exc:
         st.error(f"Failed to contact backend: {exc}")
@@ -84,7 +79,7 @@ if st.button("Send", key="send_btn"):
         audio_url = data.get("audio_url")
         if audio_url:
             try:
-                audio_resp = requests.get(f"{API_BASE}{audio_url}", timeout=60)
+                audio_resp = requests.get(f"{BACKEND_URL}{audio_url}", timeout=60)
                 if audio_resp.ok:
                     st.audio(audio_resp.content, format="audio/mp3")
             except Exception as exc:
@@ -129,7 +124,7 @@ def stream_sse():
     try:
         with st.spinner("Connecting…"):
             with requests.get(
-                f"{API_BASE}/mcp/sse", params=params, stream=True, timeout=10
+                f"{BACKEND_URL}/sse", params=params, stream=True, timeout=10
             ) as resp:
                 resp.raise_for_status()
                 total = int(resp.headers.get("Content-Length", 0))
@@ -208,24 +203,36 @@ if "call_sid" not in st.session_state:
 if "call_status" not in st.session_state:
     st.session_state.call_status = None
 
-twilio_lead_phone = st.text_input("Lead phone number (Twilio)", key="lead_phone_twilio")
+twilio_lead_phone = st.text_input("Lead phone number", key="lead_phone_twilio")
 
 if st.button("Call Lead", key="twilio_call"):
     if twilio_lead_phone:
         try:
-            sid, status = initiate_call(twilio_lead_phone)
+            resp = requests.post(
+                f"{BACKEND_URL}/call",
+                json={"phone": twilio_lead_phone},
+                timeout=60,
+            )
+            resp.raise_for_status()
         except Exception as exc:
             st.error(f"Failed to initiate call: {exc}")
         else:
-            st.session_state.call_sid = sid
-            st.session_state.call_status = status
-            st.success(f"Call started. SID: {sid}. Status: {status}")
+            data = resp.json()
+            st.session_state.call_sid = data.get("sid")
+            st.session_state.call_status = data.get("status")
+            st.success(
+                f"Call started. SID: {st.session_state.call_sid}. Status: {st.session_state.call_status}"
+            )
     else:
         st.warning("Please enter a phone number")
 
 if st.session_state.call_sid:
     try:
-        current = get_call_status(st.session_state.call_sid)
+        resp = requests.get(
+            f"{BACKEND_URL}/call/{st.session_state.call_sid}", timeout=60
+        )
+        resp.raise_for_status()
+        current = resp.json().get("status")
         st.info(f"Current call SID: {st.session_state.call_sid}. Status: {current}")
     except Exception as exc:
         st.warning(f"Could not fetch call status: {exc}")
@@ -234,7 +241,12 @@ if st.session_state.call_sid:
     with col1:
         if st.button("Cancel Call", key="cancel_call"):
             try:
-                _, status = cancel_call(st.session_state.call_sid)
+                resp = requests.post(
+                    f"{BACKEND_URL}/call/{st.session_state.call_sid}/cancel",
+                    timeout=60,
+                )
+                resp.raise_for_status()
+                status = resp.json().get("status")
                 st.session_state.call_status = status
                 st.success(f"Call canceled. Status: {status}")
             except Exception as exc:
@@ -242,7 +254,12 @@ if st.session_state.call_sid:
     with col2:
         if st.button("End Call", key="end_call"):
             try:
-                _, status = end_call(st.session_state.call_sid)
+                resp = requests.post(
+                    f"{BACKEND_URL}/call/{st.session_state.call_sid}/end",
+                    timeout=60,
+                )
+                resp.raise_for_status()
+                status = resp.json().get("status")
                 st.session_state.call_status = status
                 st.success(f"Call ended. Status: {status}")
             except Exception as exc:
