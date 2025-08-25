@@ -1,6 +1,57 @@
-.venv/
-.env
+# Python
 __pycache__/
-.DS_Store
-*.log
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+develop-eggs/
+.installed.cfg
+*.manifest
+*.spec
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.conda/
+
+# Streamlit
+.streamlit/
 *.streamlit/
+
+# Logs
+*.log
+*.out
+*.err
+
+# OS / IDE junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# dotenv / secrets
+.env
+.env.*
+secrets.toml
+
+# Coverage / testing
+.coverage
+htmlcov/
+.tox/
+pytest_cache/
+.mypy_cache/
+.pytest_cache/
+.cache/
+
+# Fly.io / Docker
+.fly/
+Dockerfile.*.backup
