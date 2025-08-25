@@ -1,5 +1,5 @@
 app = "ai-vendbot"
-primary_region = "sjc"  # Or whatever region you're closest to
+primary_region = "sjc"
 
 [env]
   PORT = "8080"
@@ -7,14 +7,9 @@ primary_region = "sjc"  # Or whatever region you're closest to
 [build]
   dockerfile = "Dockerfile"
 
-[[services]]
+[http_service]
   internal_port = 8080
-  protocol = "tcp"
-
-  [[services.ports]]
-    handlers = ["http"]
-    port = 80
-
-  [[services.ports]]
-    handlers = ["tls", "http"]
-    port = 443
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
