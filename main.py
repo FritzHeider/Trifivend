@@ -5,7 +5,12 @@ from fastapi.concurrency import run_in_threadpool
 from agent.listen import transcribe_audio
 from app.voicebot import coldcall_lead
 from agent.speak import speak_text
-from app.backend.supabase_logger import ConversationLog, log_conversation
+from app.backend.supabase_logger import (
+    ConversationLog,
+    log_conversation,
+    Lead,
+    log_lead,
+)
 from dotenv import load_dotenv
 import tempfile, shutil, os, asyncio
 from openai import AsyncOpenAI
@@ -107,6 +112,7 @@ Stay natural and conversational. The objective is to engage interest and move th
 async def stream_response(
     request: Request,
     lead_name: str,
+    phone: str,
     property_type: str,
     location_area: str,
     callback_offer: str,
@@ -119,6 +125,17 @@ async def stream_response(
 
     client_ip = x_forwarded_for or request.client.host
     background_tasks = BackgroundTasks()
+
+    lead = Lead(
+        name=lead_name,
+        phone=phone,
+        property_type=property_type,
+        location_area=location_area,
+        callback_offer=callback_offer,
+    )
+
+    await log_lead(lead)
+
     log_entry = ConversationLog(
         user_input=(
             f"SSE Request from {client_ip} | lead: {lead_name}, property: "
@@ -141,6 +158,8 @@ async def stream_response(
                     break
                 await queue.put("data: [ping]\\n\\n")
 
+        transcript: list[str] = []
+
         async def openai_stream() -> None:
             try:
                 response = await openai_client.chat.completions.create(
@@ -157,14 +176,21 @@ async def stream_response(
 
                 async for chunk in response:
                     if chunk.choices and len(chunk.choices) > 0:
-                        delta = chunk.choices[0].delta.content
-                        if delta:
-                            await queue.put(f"data: {delta}\\n\\n")
+                            delta = chunk.choices[0].delta.content
+                            if delta:
+                                transcript.append(delta)
+                                await queue.put(f"data: {delta}\\n\\n")
             except Exception as e:
                 await queue.put(f"data: [Error] {str(e)}\\n\\n")
             finally:
                 stop_event.set()
                 await queue.put("data: [END]\\n\\n")
+                await log_conversation(
+                    ConversationLog(
+                        user_input=f"Lead {lead_name} conversation",
+                        bot_reply="".join(transcript),
+                    )
+                )
 
         tasks = [asyncio.create_task(heartbeat()), asyncio.create_task(openai_stream())]
 

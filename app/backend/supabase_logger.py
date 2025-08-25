@@ -24,6 +24,20 @@ class ConversationLog(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class Lead(BaseModel):
+    """Metadata describing a call target."""
+
+    name: str
+    phone: str
+    property_type: str
+    location_area: str
+    callback_offer: str | None = None
+
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc), alias="created_at"
+    )
+
+
 async def log_conversation(
     log: ConversationLog, *, client: Optional[httpx.AsyncClient] = None
 ) -> None:
@@ -67,5 +81,38 @@ async def log_conversation(
             await client.aclose()
 
 
-__all__ = ["ConversationLog", "log_conversation"]
+async def log_lead(lead: Lead, *, client: Optional[httpx.AsyncClient] = None) -> None:
+    """Persist ``lead`` information to Supabase."""
+
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+
+    if not supabase_url or not supabase_key:
+        print("⚠️ Supabase credentials missing — skipping lead log.")
+        return
+
+    owns_client = False
+    if client is None:
+        client = httpx.AsyncClient(timeout=10.0)
+        owns_client = True
+
+    try:
+        await client.post(
+            f"{supabase_url}/rest/v1/leads",
+            headers={
+                "apikey": supabase_key,
+                "Authorization": f"Bearer {supabase_key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            },
+            json=lead.model_dump(mode="json"),
+        )
+    except Exception as e:  # pragma: no cover - network errors just logged
+        print(f"Supabase lead log error: {e}")
+    finally:
+        if owns_client:
+            await client.aclose()
+
+
+__all__ = ["ConversationLog", "log_conversation", "Lead", "log_lead"]
 

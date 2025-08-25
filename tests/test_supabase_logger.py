@@ -6,7 +6,12 @@ import httpx
 import pytest
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
-from app.backend.supabase_logger import ConversationLog, log_conversation
+from app.backend.supabase_logger import (
+    ConversationLog,
+    log_conversation,
+    Lead,
+    log_lead,
+)
 
 
 @pytest.mark.asyncio
@@ -48,4 +53,32 @@ async def test_log_conversation_skips_without_credentials(monkeypatch, capsys):
 
     captured = capsys.readouterr()
     assert "Supabase credentials missing" in captured.out
+
+
+@pytest.mark.asyncio
+async def test_log_lead_posts_payload(monkeypatch):
+    """Verify lead information is sent to Supabase."""
+
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_KEY", "testkey")
+
+    captured = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["json"] = json.loads(request.content.decode())
+        return httpx.Response(201)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        lead = Lead(
+            name="Alex",
+            phone="123",
+            property_type="apartment",
+            location_area="NYC",
+        )
+        await log_lead(lead, client=client)
+
+    assert captured["url"] == "https://example.supabase.co/rest/v1/leads"
+    assert captured["json"]["name"] == "Alex"
 
