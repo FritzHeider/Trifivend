@@ -7,7 +7,7 @@ from app.voicebot import coldcall_lead
 from agent.speak import speak_text
 from app.backend.supabase_logger import ConversationLog, log_conversation
 from dotenv import load_dotenv
-import tempfile, shutil, os
+import tempfile, shutil, os, asyncio
 from openai import AsyncOpenAI
 
 # === 🌎 Load Environment ===
@@ -131,28 +131,52 @@ async def stream_response(
     async def event_stream():
         yield "data: Connecting Ava...\n\n"
 
+        queue: asyncio.Queue[str] = asyncio.Queue()
+        stop_event = asyncio.Event()
+
+        async def heartbeat() -> None:
+            while not stop_event.is_set():
+                await asyncio.sleep(25)
+                if stop_event.is_set():
+                    break
+                await queue.put("data: [ping]\\n\\n")
+
+        async def openai_stream() -> None:
+            try:
+                response = await openai_client.chat.completions.create(
+                    model=OPENAI_MODEL,
+                    messages=[
+                        {"role": "system", "content": prompt_filled},
+                        {
+                            "role": "user",
+                            "content": f"Hi {lead_name}, this is Ava calling from Trifivend.",
+                        },
+                    ],
+                    stream=True,
+                )
+
+                async for chunk in response:
+                    if chunk.choices and len(chunk.choices) > 0:
+                        delta = chunk.choices[0].delta.content
+                        if delta:
+                            await queue.put(f"data: {delta}\\n\\n")
+            except Exception as e:
+                await queue.put(f"data: [Error] {str(e)}\\n\\n")
+            finally:
+                stop_event.set()
+                await queue.put("data: [END]\\n\\n")
+
+        tasks = [asyncio.create_task(heartbeat()), asyncio.create_task(openai_stream())]
+
         try:
-            response = await openai_client.chat.completions.create(
-                model=OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": prompt_filled},
-                    {
-                        "role": "user",
-                        "content": f"Hi {lead_name}, this is Ava calling from Trifivend.",
-                    },
-                ],
-                stream=True,
-            )
-
-            async for chunk in response:
-                if chunk.choices and len(chunk.choices) > 0:
-                    delta = chunk.choices[0].delta.content
-                    if delta:
-                        yield f"data: {delta}\n\n"
-        except Exception as e:
-            yield f"data: [Error] {str(e)}\n\n"
-
-        yield "data: [END]\n\n"
+            while True:
+                message = await queue.get()
+                yield message
+                if message == "data: [END]\\n\\n":
+                    break
+        finally:
+            for t in tasks:
+                t.cancel()
 
     return StreamingResponse(
         event_stream(), media_type="text/event-stream", background=background_tasks
