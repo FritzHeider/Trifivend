@@ -67,7 +67,7 @@ async def test_sse_concurrent(monkeypatch):
         }
 
         async def get():
-            resp = await client.get("/mcp/sse", params=params)
+            resp = await client.get("/sse", params=params)
             assert resp.status_code == 200
             assert "hello" in resp.text
 

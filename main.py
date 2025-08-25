@@ -1,19 +1,29 @@
-from fastapi import FastAPI, UploadFile, File, BackgroundTasks, Request, Header, HTTPException
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.concurrency import run_in_threadpool
 from agent.listen import transcribe_audio
 from app.voicebot import coldcall_lead
 from agent.speak import speak_text
 from app.backend.supabase_logger import (
     ConversationLog,
-    log_conversation,
     Lead,
+    log_conversation,
     log_lead,
 )
 from dotenv import load_dotenv
 import tempfile, shutil, os, asyncio
 from openai import AsyncOpenAI
+from twilio.rest import Client
 
 # === 🌎 Load Environment ===
 load_dotenv()
@@ -22,6 +32,13 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4")
 
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+# === ☎️ Twilio Setup ===
+APP_BASE_URL = os.getenv("APP_BASE_URL", "https://ai-vendbot.fly.dev")
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_NUMBER = os.getenv("TWILIO_NUMBER")
+twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 # === 🚀 Initialize FastAPI App ===
 app = FastAPI()
@@ -93,6 +110,72 @@ async def serve_audio():
         return {"error": "No audio available"}
     return FileResponse(file_path, media_type="audio/mpeg")
 
+# === 📞 Start an outbound call ===
+@app.post("/call")
+async def call_lead(phone: str):
+    """Initiate an outbound call via Twilio."""
+    call = await run_in_threadpool(
+        twilio_client.calls.create,
+        to=phone,
+        from_=TWILIO_NUMBER,
+        url=f"{APP_BASE_URL}/twilio-voice",
+        status_callback=f"{APP_BASE_URL}/status",
+        status_callback_method="POST",
+        method="POST",
+    )
+    return {"sid": call.sid, "status": call.status}
+
+# === ☎️ Twilio voice webhook ===
+@app.post("/twilio-voice")
+async def twilio_voice(SpeechResult: str = Form(None)):
+    """Handle Twilio <Gather> speech and respond with new audio."""
+    if SpeechResult:
+        gpt_reply = await run_in_threadpool(
+            coldcall_lead, [{"role": "user", "content": SpeechResult}]
+        )
+        await run_in_threadpool(speak_text, gpt_reply)
+        play_url = f"{APP_BASE_URL}/audio/response.mp3"
+        twiml = f"""
+            <Response>
+                <Play>{play_url}</Play>
+                <Gather input="speech" action="/twilio-voice" method="POST"
+                        timeout="5" speechTimeout="auto">
+                    <Say>...</Say>
+                </Gather>
+            </Response>
+        """
+    else:
+        twiml = """
+            <Response>
+                <Say>Hi, this is Ava from Trifivend. Are you the right person to speak with about smart vending solutions?</Say>
+                <Gather input="speech" action="/twilio-voice" method="POST"
+                        timeout="5" speechTimeout="auto">
+                    <Say>I'm listening...</Say>
+                </Gather>
+            </Response>
+        """
+    return Response(content=twiml.strip(), media_type="application/xml")
+
+# === 📟 Call management ===
+@app.get("/call/{sid}")
+async def call_status(sid: str):
+    call = await run_in_threadpool(twilio_client.calls(sid).fetch)
+    return {"sid": call.sid, "status": call.status}
+
+@app.post("/call/{sid}/cancel")
+async def call_cancel(sid: str):
+    call = await run_in_threadpool(
+        twilio_client.calls(sid).update, status="canceled"
+    )
+    return {"sid": call.sid, "status": call.status}
+
+@app.post("/call/{sid}/end")
+async def call_end(sid: str):
+    call = await run_in_threadpool(
+        twilio_client.calls(sid).update, status="completed"
+    )
+    return {"sid": call.sid, "status": call.status}
+
 # === 🔁 MCP SSE Endpoint for ElevenLabs GPT Call Script ===
 SYSTEM_PROMPT = """
 You are a professional AI voice agent named Ava. You are calling on behalf of Trifivend to introduce a luxury AI vending machine solution to {{lead_name}}, a property manager of a {{property_type}} in {{location_area}}.
@@ -108,6 +191,7 @@ Your goals:
 Stay natural and conversational. The objective is to engage interest and move the lead toward a next step (callback, demo, or approval).
 """
 
+@app.get("/sse")
 @app.get("/mcp/sse")
 async def stream_response(
     request: Request,
