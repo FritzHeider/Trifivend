@@ -60,6 +60,7 @@ async def test_sse_concurrent(monkeypatch):
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         params = {
             "lead_name": "a",
+            "phone": "123",
             "property_type": "b",
             "location_area": "c",
             "callback_offer": "d",

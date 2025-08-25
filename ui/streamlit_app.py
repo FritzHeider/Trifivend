@@ -94,6 +94,7 @@ if st.button("Send"):
 
 st.subheader("Stream from /mcp/sse")
 lead_name = st.text_input("Lead name", "Alex", key="lead")
+lead_phone = st.text_input("Phone number", "123-456-7890", key="phone")
 property_type = st.text_input("Property type", "apartment", key="ptype")
 location_area = st.text_input("Location area", "NYC", key="loc")
 callback_offer = st.text_input("Callback offer", "schedule a demo", key="offer")
@@ -103,6 +104,7 @@ if st.button("Start SSE Stream"):
     collected = ""
     params = {
         "lead_name": lead_name,
+        "phone": lead_phone,
         "property_type": property_type,
         "location_area": location_area,
         "callback_offer": callback_offer,
