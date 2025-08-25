@@ -11,10 +11,10 @@ load_dotenv()
 to_number = os.getenv("LEAD_PHONE")          # e.g. +15551231234
 from_number = os.getenv("TWILIO_NUMBER")     # Your Twilio verified number
 voice_url = os.getenv("VOICE_WEBHOOK_URL", "https://your-app.fly.dev/twilio-voice")
-TWILIO_SID = os.getenv("TWILIO_SID")
-TWILIO_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 
-client = Client(TWILIO_SID, TWILIO_TOKEN)
+client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 call = client.calls.create(
     to=to_number,
