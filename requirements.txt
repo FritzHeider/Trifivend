@@ -32,3 +32,4 @@ pytest-asyncio
 
 # Streamlit UI
 streamlit
+sse-starlette 

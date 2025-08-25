@@ -4,7 +4,7 @@ from fastapi.responses import Response
 from fastapi.concurrency import run_in_threadpool
 from agent.speak import speak_text
 try:
-    from agent.voicebot import coldcall_lead
+    from app.voicebot import coldcall_lead
 except ImportError:  # pragma: no cover - fallback for production
     from app.voicebot import coldcall_lead
 

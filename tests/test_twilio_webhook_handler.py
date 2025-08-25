@@ -16,7 +16,7 @@ def _load_app(monkeypatch):
     if 'twilio.webhook_handler' in sys.modules:
         del sys.modules['twilio.webhook_handler']
     sys.modules.pop('twilio', None)
-    import twilio.webhook_handler as handler
+    import twilio_utils.webhook_handler as handler
 
     mock_speak = Mock()
     monkeypatch.setattr(handler, 'speak_text', mock_speak)
