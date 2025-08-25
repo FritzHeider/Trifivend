@@ -19,11 +19,27 @@ st.title("Trifivend Streamlit Interface")
 if "history" not in st.session_state:
     st.session_state.history = []
 
-# Sidebar history
-st.sidebar.title("Conversation History")
+# Render conversation history on main page
 for item in st.session_state.history:
-    st.sidebar.markdown(
-        f"**{item['timestamp']}**\n\nYou: {item['user']}\n\nAva: {item['bot']}\n---"
+    st.chat_message("user", item["user"])
+    st.chat_message("assistant", item["bot"])
+
+# Conversation controls
+clear_col, download_col = st.columns(2)
+with clear_col:
+    if st.button("Clear History"):
+        st.session_state.history = []
+        st.experimental_rerun()
+with download_col:
+    transcript = "\n\n".join(
+        f"{item['timestamp']}\nYou: {item['user']}\nAva: {item['bot']}"
+        for item in st.session_state.history
+    )
+    st.download_button(
+        "Download Transcript",
+        transcript,
+        file_name="transcript.txt",
+        mime="text/plain",
     )
 
 # Input controls
