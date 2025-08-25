@@ -5,7 +5,12 @@ from fastapi.concurrency import run_in_threadpool
 from agent.listen import transcribe_audio
 from app.voicebot import coldcall_lead
 from agent.speak import speak_text
-from app.backend.supabase_logger import ConversationLog, log_conversation
+from app.backend.supabase_logger import (
+    ConversationLog,
+    LeadScript,
+    log_conversation,
+    log_lead_script,
+)
 from dotenv import load_dotenv
 import tempfile, shutil, os, asyncio
 from openai import AsyncOpenAI
@@ -110,12 +115,17 @@ async def stream_response(
     property_type: str,
     location_area: str,
     callback_offer: str,
-    x_forwarded_for: str = Header(default="")
+    call_script: str | None = None,
+    system_prompt: str | None = None,
+    x_forwarded_for: str = Header(default=""),
 ):
-    prompt_filled = SYSTEM_PROMPT.replace("{{lead_name}}", lead_name)\
-                                 .replace("{{property_type}}", property_type)\
-                                 .replace("{{location_area}}", location_area)\
-                                 .replace("{{callback_offer}}", callback_offer)
+    filled_prompt = (system_prompt or SYSTEM_PROMPT)
+    filled_prompt = (
+        filled_prompt.replace("{{lead_name}}", lead_name)
+        .replace("{{property_type}}", property_type)
+        .replace("{{location_area}}", location_area)
+        .replace("{{callback_offer}}", callback_offer)
+    )
 
     client_ip = x_forwarded_for or request.client.host
     background_tasks = BackgroundTasks()
@@ -127,6 +137,18 @@ async def stream_response(
         bot_reply="[SSE stream initiated]",
     )
     background_tasks.add_task(log_conversation, log_entry)
+    async def log_script_async(script: LeadScript) -> None:
+        await log_lead_script(script)
+
+    background_tasks.add_task(
+        log_script_async,
+        LeadScript(
+            lead_name=lead_name,
+            call_script=call_script
+            or f"Hi {lead_name}, this is Ava calling from Trifivend.",
+            system_prompt=filled_prompt,
+        ),
+    )
 
     async def event_stream():
         yield "data: Connecting Ava...\n\n"
@@ -146,10 +168,11 @@ async def stream_response(
                 response = await openai_client.chat.completions.create(
                     model=OPENAI_MODEL,
                     messages=[
-                        {"role": "system", "content": prompt_filled},
+                        {"role": "system", "content": filled_prompt},
                         {
                             "role": "user",
-                            "content": f"Hi {lead_name}, this is Ava calling from Trifivend.",
+                            "content": call_script
+                            or f"Hi {lead_name}, this is Ava calling from Trifivend.",
                         },
                     ],
                     stream=True,

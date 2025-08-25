@@ -1,4 +1,5 @@
 import sys
+import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -6,37 +7,49 @@ import types
 from unittest.mock import Mock
 from fastapi.testclient import TestClient
 
+from app.backend.supabase_logger import LeadScript
 
-def _load_app(monkeypatch):
-    stub = types.ModuleType('app.voicebot')
-    mock_coldcall = Mock(return_value='AI reply')
+
+def _load_app(monkeypatch, script):
+    stub = types.ModuleType("app.voicebot")
+    mock_coldcall = Mock(return_value="AI reply")
     stub.coldcall_lead = mock_coldcall
-    sys.modules['app.voicebot'] = stub
+    sys.modules["app.voicebot"] = stub
 
-    if 'twilio.webhook_handler' in sys.modules:
-        del sys.modules['twilio.webhook_handler']
+    if "twilio.webhook_handler" in sys.modules:
+        del sys.modules["twilio.webhook_handler"]
     import twilio.webhook_handler as handler
 
     mock_speak = Mock()
-    monkeypatch.setattr(handler, 'speak_text', mock_speak)
+    monkeypatch.setattr(handler, "speak_text", mock_speak)
+
+    async def fake_fetch(*_, **__):
+        return script
+
+    monkeypatch.setattr(handler, "fetch_lead_script", fake_fetch)
     return handler.app, mock_coldcall, mock_speak
 
 
 def test_twilio_voice_with_speech(monkeypatch):
-    app, mock_coldcall, mock_speak = _load_app(monkeypatch)
+    script = LeadScript(lead_name="lead", call_script="hello", system_prompt="sys")
+    app, mock_coldcall, mock_speak = _load_app(monkeypatch, script)
     client = TestClient(app)
-    resp = client.post('/twilio-voice', data={'SpeechResult': 'hi'})
+    resp = client.post("/twilio-voice?lead_name=lead", data={"SpeechResult": "hi"})
     assert resp.status_code == 200
-    assert '<Play>https://your-app.fly.dev/audio/response.mp3</Play>' in resp.text
-    mock_coldcall.assert_called_once_with([{'role': 'user', 'content': 'hi'}])
-    mock_speak.assert_called_once_with('AI reply')
+    assert "<Play>https://your-app.fly.dev/audio/response.mp3</Play>" in resp.text
+    mock_coldcall.assert_called_once_with(
+        [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
+    )
+    mock_speak.assert_called_once_with("AI reply")
 
 
 def test_twilio_voice_without_speech(monkeypatch):
-    app, mock_coldcall, mock_speak = _load_app(monkeypatch)
+    script = LeadScript(lead_name="lead", call_script="Custom greeting", system_prompt="sys")
+    app, mock_coldcall, mock_speak = _load_app(monkeypatch, script)
     client = TestClient(app)
-    resp = client.post('/twilio-voice')
+    resp = client.post("/twilio-voice?lead_name=lead")
     assert resp.status_code == 200
-    assert 'Ava from Trifivend' in resp.text
+    assert "Custom greeting" in resp.text
+    assert "action=\"/twilio-voice?lead_name=lead\"" in resp.text
     mock_coldcall.assert_not_called()
     mock_speak.assert_not_called()

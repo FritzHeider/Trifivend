@@ -74,6 +74,16 @@ lead_name = st.text_input("Lead name", "Alex", key="lead")
 property_type = st.text_input("Property type", "apartment", key="ptype")
 location_area = st.text_input("Location area", "NYC", key="loc")
 callback_offer = st.text_input("Callback offer", "schedule a demo", key="offer")
+call_script = st.text_area(
+    "Call Script",
+    f"Hi {lead_name}, this is Ava from Trifivend. Are you available to talk?",
+    key="script",
+)
+system_prompt = st.text_area(
+    "System Prompt",
+    "You are Ava, an AI caller for Trifivend. Be concise and friendly.",
+    key="sys",
+)
 
 if st.button("Start SSE Stream"):
     placeholder = st.empty()
@@ -83,6 +93,8 @@ if st.button("Start SSE Stream"):
         "property_type": property_type,
         "location_area": location_area,
         "callback_offer": callback_offer,
+        "call_script": call_script,
+        "system_prompt": system_prompt,
     }
     try:
         with requests.get(

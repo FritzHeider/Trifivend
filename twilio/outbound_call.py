@@ -8,9 +8,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-to_number = os.getenv("LEAD_PHONE")          # e.g. +15551231234
-from_number = os.getenv("TWILIO_NUMBER")     # Your Twilio verified number
-voice_url = os.getenv("VOICE_WEBHOOK_URL", "https://your-app.fly.dev/twilio-voice")
+to_number = os.getenv("LEAD_PHONE")  # e.g. +15551231234
+from_number = os.getenv("TWILIO_NUMBER")  # Your Twilio verified number
+lead_name = os.getenv("LEAD_NAME", "lead")
+voice_base = os.getenv("VOICE_WEBHOOK_URL", "https://your-app.fly.dev/twilio-voice")
+voice_url = f"{voice_base}?lead_name={lead_name}"
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 

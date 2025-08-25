@@ -6,7 +6,13 @@ import httpx
 import pytest
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
-from app.backend.supabase_logger import ConversationLog, log_conversation
+from app.backend.supabase_logger import (
+    ConversationLog,
+    LeadScript,
+    log_conversation,
+    log_lead_script,
+    fetch_lead_script,
+)
 
 
 @pytest.mark.asyncio
@@ -48,4 +54,27 @@ async def test_log_conversation_skips_without_credentials(monkeypatch, capsys):
 
     captured = capsys.readouterr()
     assert "Supabase credentials missing" in captured.out
+
+
+@pytest.mark.asyncio
+async def test_log_and_fetch_lead_script(monkeypatch):
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_KEY", "testkey")
+
+    stored = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            stored.update(json.loads(request.content.decode()))
+            return httpx.Response(201)
+        return httpx.Response(200, json=[stored])
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        script = LeadScript(lead_name="Alex", call_script="hi", system_prompt="sys")
+        await log_lead_script(script, client=client)
+        fetched = await fetch_lead_script("Alex", client=client)
+
+    assert stored["lead_name"] == "Alex"
+    assert fetched and fetched.call_script == "hi"
 
