@@ -1,266 +1,103 @@
-from datetime import datetime
-import os
+# ui/streamlit_app.py
+import json
+import time
 import requests
 import streamlit as st
 
-# Backend URL hosted on Fly.io
-BACKEND_URL = os.getenv("BACKEND_URL", "https://ai-vendbot.fly.dev")
+# ---- Config ---------------------------------------------------------------
+BACKEND_URL = st.secrets.get("BACKEND_URL", "http://localhost:8080")  # e.g., https://ai-vendbot.fly.dev
 
-st.set_page_config(page_title="Trifivend Chat")
+st.set_page_config(page_title="Trifivend Streamlit Interface", layout="wide")
 st.title("Trifivend Streamlit Interface")
 
-# ---------------------------
-# Conversation history
-# ---------------------------
-if "history" not in st.session_state:
-    st.session_state.history = []
+# ---- Session state --------------------------------------------------------
+if "messages" not in st.session_state:
+    st.session_state.messages = []  # [{role: "user"|"assistant"|"system", content: str}]
+if "call_sid" not in st.session_state:
+    st.session_state.call_sid = None
 
-for item in st.session_state.history:
-    st.chat_message("user", item["user"])
-    st.chat_message("assistant", item["bot"])
+# ---- Helpers --------------------------------------------------------------
+def add_msg(role: str, content: str):
+    st.session_state.messages.append({"role": role, "content": content})
 
-clear_col, download_col = st.columns(2)
-with clear_col:
-    if st.button("Clear History"):
-        st.session_state.history = []
-        st.experimental_rerun()
+def render_history():
+    for m in st.session_state.messages:
+        with st.chat_message(m["role"]):
+            st.write(m["content"])
 
-with download_col:
-    transcript = "\n\n".join(
-        f"{item['timestamp']}\nYou: {item['user']}\nAva: {item['bot']}"
-        for item in st.session_state.history
-    )
-    st.download_button(
-        "Download Transcript",
-        transcript,
-        file_name="transcript.txt",
-        mime="text/plain",
-    )
-
-# ---------------------------
-# Text/Audio input -> /transcribe
-# ---------------------------
-text_input = st.text_input("Enter text message", key="txt_input")
-uploaded_audio = st.file_uploader("Upload audio file", type=["wav", "mp3", "m4a"], key="upl_audio")
-
-try:
-    recorded_audio = st.audio_input("Record from microphone", key="mic_audio")
-except Exception:
-    recorded_audio = None
-
-if st.button("Send", key="send_btn"):
-    if recorded_audio is not None:
-        file_bytes = recorded_audio.getvalue()
-        filename = "recorded.wav"
-        mime = recorded_audio.type or "audio/wav"
-    elif uploaded_audio is not None:
-        file_bytes = uploaded_audio.read()
-        filename = uploaded_audio.name
-        mime = uploaded_audio.type or "audio/wav"
-    elif text_input:
-        file_bytes = text_input.encode("utf-8")
-        filename = "input.txt"
-        mime = "text/plain"
-    else:
-        st.warning("Please provide text or audio input")
-        st.stop()
-
-    files = {"file": (filename, file_bytes, mime)}
-    try:
-        resp = requests.post(f"{BACKEND_URL}/transcribe", files=files, timeout=60)
-        resp.raise_for_status()
-    except Exception as exc:
-        st.error(f"Failed to contact backend: {exc}")
-    else:
-        data = resp.json()
-        st.write("**Transcription:**", data.get("transcription", ""))
-        st.write("**Response:**", data.get("response", ""))
-
-        audio_url = data.get("audio_url")
-        if audio_url:
-            try:
-                audio_resp = requests.get(f"{BACKEND_URL}{audio_url}", timeout=60)
-                if audio_resp.ok:
-                    st.audio(audio_resp.content, format="audio/mp3")
-            except Exception as exc:
-                st.warning(f"Could not retrieve audio: {exc}")
-
-        st.session_state.history.append(
-            {
-                "timestamp": datetime.now().strftime("%H:%M:%S"),
-                "user": data.get("transcription", text_input or "[no input]"),
-                "bot": data.get("response", ""),
-            }
-        )
-
-# ---------------------------
-# SSE stream from /mcp/sse
-# ---------------------------
-st.subheader("Stream from /mcp/sse")
-
-lead_name = st.text_input("Lead name", "Alex", key="lead_name")
-lead_phone = st.text_input("Phone number", "123-456-7890", key="lead_phone_for_sse")
-property_type = st.text_input("Property type", "apartment", key="property_type")
-location_area = st.text_input("Location area", "NYC", key="location_area")
-callback_offer = st.text_input("Callback offer", "schedule a demo", key="callback_offer")
-
-# SSE state
-if "do_sse" not in st.session_state:
-    st.session_state.do_sse = False
-if "sse_collected" not in st.session_state:
-    st.session_state.sse_collected = ""
-if "sse_params" not in st.session_state:
-    st.session_state.sse_params = {}
-
-def stream_sse():
-    params = st.session_state.sse_params
-    collected = st.session_state.sse_collected
-
-    chat = st.chat_message("assistant")
-    message_placeholder = chat.empty()
-    if collected:
-        message_placeholder.markdown(collected)
-
-    try:
-        with st.spinner("Connecting…"):
-            with requests.get(
-                f"{BACKEND_URL}/sse", params=params, stream=True, timeout=10
-            ) as resp:
-                resp.raise_for_status()
-                total = int(resp.headers.get("Content-Length", 0))
-                progress_bar = st.progress(0) if total else None
-                bytes_received = len(collected.encode())
-
-                for raw in resp.iter_lines():
-                    # Allow user to stop mid-stream
-                    if not st.session_state.do_sse:
-                        break
-                    if not raw:
-                        continue
-                    decoded = raw.decode("utf-8")
-                    if decoded.startswith("data: "):
-                        chunk = decoded.replace("data: ", "", 1)
-                        if chunk == "[END]":
-                            st.session_state.do_sse = False
-                            break
-                        collected += chunk
-                        st.session_state.sse_collected = collected
-                        message_placeholder.markdown(collected)
-                        bytes_received += len(chunk)
-                        if progress_bar and total:
-                            progress_bar.progress(min(bytes_received / max(total, 1), 1.0))
-                if progress_bar:
-                    progress_bar.empty()
-    except requests.exceptions.RequestException as exc:
-        st.warning(f"SSE connection failed: {exc}")
-        if st.button("Retry", key="retry_sse"):
-            st.session_state.do_sse = True
-        else:
-            st.session_state.do_sse = False
-    else:
-        # if ended normally (or by [END]) persist to history
-        if collected:
-            st.session_state.history.append(
-                {
-                    "timestamp": datetime.now().strftime("%H:%M:%S"),
-                    "user": "[SSE]",
-                    "bot": collected,
-                }
-            )
-    finally:
-        # reset on exit if we’re no longer streaming
-        if not st.session_state.do_sse:
-            st.session_state.sse_collected = ""
-
-cols = st.columns(3)
-with cols[0]:
-    if st.button("Start SSE Stream", key="start_sse"):
-        st.session_state.sse_params = {
+def start_call(lead_phone: str, lead_name: str, property_type: str, location_area: str, callback_offer: str):
+    # hits FastAPI /call (server holds Twilio creds)
+    resp = requests.post(
+        f"{BACKEND_URL}/call",
+        json={
+            "to": lead_phone,
             "lead_name": lead_name,
-            "phone": lead_phone,
             "property_type": property_type,
             "location_area": location_area,
             "callback_offer": callback_offer,
-        }
-        st.session_state.sse_collected = ""
-        st.session_state.do_sse = True
-with cols[1]:
-    if st.button("Stop SSE", key="stop_sse"):
-        st.session_state.do_sse = False
-with cols[2]:
-    st.caption("Use **Stop SSE** to interrupt a long stream.")
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()["call_sid"]
 
-if st.session_state.do_sse:
-    stream_sse()
+def stream_events(call_sid: str):
+    # simple SSE reader without extra deps
+    with requests.get(f"{BACKEND_URL}/sse", params={"sid": call_sid}, stream=True, timeout=300) as r:
+        r.raise_for_status()
+        for line in r.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            if line.startswith("data:"):
+                data = line.split("data:", 1)[1].strip()
+                if data == "{}":  # heartbeat
+                    continue
+                evt = json.loads(data)
+                yield evt
 
-# ---------------------------
-# Twilio: call lead controls
-# ---------------------------
-st.subheader("Call Lead via Twilio")
-
-if "call_sid" not in st.session_state:
-    st.session_state.call_sid = None
-if "call_status" not in st.session_state:
-    st.session_state.call_status = None
-
-twilio_lead_phone = st.text_input("Lead phone number", key="lead_phone_twilio")
-
-if st.button("Call Lead", key="twilio_call"):
-    if twilio_lead_phone:
-        try:
-            resp = requests.post(
-                f"{BACKEND_URL}/call",
-                json={"phone": twilio_lead_phone},
-                timeout=60,
-            )
-            resp.raise_for_status()
-        except Exception as exc:
-            st.error(f"Failed to initiate call: {exc}")
-        else:
-            data = resp.json()
-            st.session_state.call_sid = data.get("sid")
-            st.session_state.call_status = data.get("status")
-            st.success(
-                f"Call started. SID: {st.session_state.call_sid}. Status: {st.session_state.call_status}"
-            )
-    else:
-        st.warning("Please enter a phone number")
-
-if st.session_state.call_sid:
-    try:
-        resp = requests.get(
-            f"{BACKEND_URL}/call/{st.session_state.call_sid}", timeout=60
-        )
-        resp.raise_for_status()
-        current = resp.json().get("status")
-        st.info(f"Current call SID: {st.session_state.call_sid}. Status: {current}")
-    except Exception as exc:
-        st.warning(f"Could not fetch call status: {exc}")
-
+# ---- UI: lead form --------------------------------------------------------
+with st.form("lead_form", clear_on_submit=False):
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("Cancel Call", key="cancel_call"):
-            try:
-                resp = requests.post(
-                    f"{BACKEND_URL}/call/{st.session_state.call_sid}/cancel",
-                    timeout=60,
-                )
-                resp.raise_for_status()
-                status = resp.json().get("status")
-                st.session_state.call_status = status
-                st.success(f"Call canceled. Status: {status}")
-            except Exception as exc:
-                st.error(f"Failed to cancel call: {exc}")
+        lead_name = st.text_input("Lead name", "Alex")
+        property_type = st.text_input("Property type", "apartment")
+        location_area = st.text_input("Location area", "San Francisco")
     with col2:
-        if st.button("End Call", key="end_call"):
-            try:
-                resp = requests.post(
-                    f"{BACKEND_URL}/call/{st.session_state.call_sid}/end",
-                    timeout=60,
-                )
-                resp.raise_for_status()
-                status = resp.json().get("status")
-                st.session_state.call_status = status
-                st.success(f"Call ended. Status: {status}")
-            except Exception as exc:
-                st.error(f"Failed to end call: {exc}")
+        lead_phone = st.text_input("Lead phone (E.164)", "+14155550123")
+        callback_offer = st.text_input("Callback offer", "schedule a free design session")
+
+    submitted = st.form_submit_button("Start Call")
+    if submitted:
+        try:
+            add_msg("system", f"Dialing {lead_phone} ({lead_name})…")
+            st.session_state.call_sid = start_call(
+                lead_phone, lead_name, property_type, location_area, callback_offer
+            )
+            add_msg("system", f"Call SID: {st.session_state.call_sid}")
+        except Exception as e:
+            add_msg("assistant", f"❌ Failed to start call: {e}")
+
+# ---- Chat history (fixed API usage) --------------------------------------
+render_history()
+
+# ---- Live event stream (optional button) ----------------------------------
+if st.session_state.call_sid:
+    if st.button("Follow Live Call Events"):
+        placeholder = st.empty()
+        try:
+            for evt in stream_events(st.session_state.call_sid):
+                status = evt.get("status") or evt.get("event")
+                with placeholder.container():
+                    with st.chat_message("assistant"):
+                        st.write(f"📡 **Twilio** → `{status}`")
+                if status in ("completed", "failed", "busy", "no-answer", "canceled"):
+                    add_msg("assistant", f"✅ Call finished with status: **{status}**")
+                    break
+        except Exception as e:
+            add_msg("assistant", f"❌ SSE stream error: {e}")
+
+# ---- Freeform chat box (optional) ----------------------------------------
+if prompt := st.chat_input("Type a note to log with this lead…"):
+    add_msg("user", prompt)
+    with st.chat_message("assistant"):
+        st.write("Noted. (You can wire this to Supabase logging if desired.)")
