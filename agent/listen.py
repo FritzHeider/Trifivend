@@ -1,8 +1,10 @@
 """Speech-to-text helpers using OpenAI Whisper."""
 
-import openai
 import os
 import tempfile
+from openai import OpenAI
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 def transcribe_audio(audio_bytes: bytes, sample_rate: int) -> str:
@@ -13,7 +15,10 @@ def transcribe_audio(audio_bytes: bytes, sample_rate: int) -> str:
             tmp_path = tmp.name
         try:
             with open(tmp_path, "rb") as f:
-                return openai.Audio.transcribe("whisper-1", f)["text"]
+                transcription = client.audio.transcriptions.create(
+                    model="whisper-1", file=f
+                )
+                return transcription.text
         finally:
             os.remove(tmp_path)
     except Exception as e:
