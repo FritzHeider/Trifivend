@@ -1,8 +1,12 @@
 import os
 from fastapi import FastAPI, Form
 from fastapi.responses import Response
+from fastapi.concurrency import run_in_threadpool
 from agent.speak import speak_text
-from app.voicebot import coldcall_lead
+try:
+    from agent.voicebot import coldcall_lead
+except ImportError:  # pragma: no cover - fallback for production
+    from app.voicebot import coldcall_lead
 
 APP_BASE_URL = os.getenv("APP_BASE_URL", "https://your-app.fly.dev")
 
@@ -13,9 +17,11 @@ async def twilio_voice(SpeechResult: str = Form(None)):
     print("☎️ Received:", SpeechResult)
 
     if SpeechResult:
-        # Generate AI reply and synthesize voice
-        gpt_reply = coldcall_lead([{"role": "user", "content": SpeechResult}])
-        speak_text(gpt_reply)  # Saves to /tmp/response.mp3
+        # Generate AI reply and synthesize voice without blocking the event loop
+        gpt_reply = await run_in_threadpool(
+            coldcall_lead, [{"role": "user", "content": SpeechResult}]
+        )
+        await run_in_threadpool(speak_text, gpt_reply)  # Saves to /tmp/response.mp3
 
         play_url = f"{APP_BASE_URL}/audio/response.mp3"
         twiml = f'''
@@ -30,7 +36,7 @@ async def twilio_voice(SpeechResult: str = Form(None)):
         # Initial greeting or re-entry point
         twiml = '''
             <Response>
-                <Say>Hi, this is Ava from Trifivend. I wanted to quickly ask about your vending machine setup. Are you the right person to speak with?</Say>
+                <Say>Hi, this is Taylor from SmartVend. I wanted to quickly ask about your vending machine setup. Are you the right person to speak with?</Say>
                 <Gather input="speech" action="/twilio-voice" method="POST" timeout="5" speechTimeout="auto">
                     <Say>I'm listening...</Say>
                 </Gather>
