@@ -3,7 +3,12 @@
 import os
 import requests
 
-def speak_text(text: str, output_path: str = "/tmp/response.mp3") -> str:
+
+def speak_text(
+    text: str,
+    output_path: str = "/tmp/response.mp3",
+    timeout: float = 10.0,
+) -> str:
     """Convert ``text`` to speech and save it to ``output_path``.
 
     Parameters
@@ -12,6 +17,8 @@ def speak_text(text: str, output_path: str = "/tmp/response.mp3") -> str:
         The text to convert to speech.
     output_path:
         Where the resulting MP3 should be written. Defaults to ``/tmp/response.mp3``.
+    timeout:
+        Number of seconds to wait for the ElevenLabs API response. Defaults to 10 seconds.
 
     Returns
     -------
@@ -36,7 +43,7 @@ def speak_text(text: str, output_path: str = "/tmp/response.mp3") -> str:
     }
 
     try:
-        response = requests.post(url, headers=headers, json=data)
+        response = requests.post(url, headers=headers, json=data, timeout=timeout)
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
         raise RuntimeError(f"ElevenLabs TTS failed: {str(e)}") from e

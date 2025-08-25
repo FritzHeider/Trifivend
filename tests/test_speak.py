@@ -14,10 +14,11 @@ def test_speak_text_success(tmp_path, monkeypatch):
     mock_response.content = b'audio-data'
     mock_response.raise_for_status.return_value = None
 
-    def mock_post(url, headers, json):
+    def mock_post(url, headers, json, timeout=None):
         assert url.endswith('/v1/text-to-speech/test-voice')
         assert headers['xi-api-key'] == 'test-key'
         assert json['text'] == 'hello'
+        assert timeout == 10.0
         return mock_response
 
     monkeypatch.setenv('ELEVEN_VOICE_ID', 'test-voice')
