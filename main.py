@@ -81,24 +81,42 @@ app.add_middleware(
 # Models / Validation
 # ----------------------------------------------------------------------------
 E164_RE = re.compile(r"^\+\d{8,15}$")
-
 class CallRequest(BaseModel):
     # Accept both "to" (preferred) and legacy "phone"
-    to: str = Field(..., alias="phone", description="E.164, e.g. +14155550123")
-    lead_name: str
-    property_type: str
-    location_area: str
-    callback_offer: str
+    to: str = Field(..., alias="phone", description="E.164 number, e.g. +14155550123")
+    lead_name: Optional[str] = None
+    property_type: Optional[str] = None
+    location_area: Optional[str] = None
+    callback_offer: Optional[str] = None
 
     class Config:
-        allow_population_by_field_name = True  # lets clients send "to"
+        # This line makes Pydantic accept either "to" OR "phone" in the body
+        allow_population_by_field_name = True
+        allow_population_by_alias = True   # <--- add this
 
     @validator("to")
-    def _e164(cls, v: str) -> str:
-        v = v.strip()
-        if not E164_RE.match(v):
-            raise ValueError("Invalid phone format. Use E.164 like +14155550123.")
-        return v
+    def _valid_e164(cls, v: str) -> str:
+        vv = v.strip()
+        if not E164_RE.match(vv):
+            raise ValueError("Invalid phone format. Use E.164 like +14155550123")
+        return vv
+# class CallRequest(BaseModel):
+#     # Accept both "to" (preferred) and legacy "phone"
+#     to: str = Field(..., alias="phone", description="E.164, e.g. +14155550123")
+#     lead_name: str
+#     property_type: str
+#     location_area: str
+#     callback_offer: str
+# 
+#     class Config:
+#         allow_population_by_field_name = True  # lets clients send "to"
+# 
+#     @validator("to")
+#     def _e164(cls, v: str) -> str:
+#         v = v.strip()
+#         if not E164_RE.match(v):
+#             raise ValueError("Invalid phone format. Use E.164 like +14155550123.")
+#         return v
 # class CallRequest(BaseModel):
 #     """
 #     Body accepted by POST /call.
