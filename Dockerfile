@@ -1,4 +1,3 @@
-# Dockerfile
 FROM python:3.10-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -7,23 +6,19 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# OS deps (sound + ffmpeg if you ever use sounddevice)
+# OS deps (only what we truly need)
 RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    libsndfile1 \
-    libportaudio2 \
     curl \
  && rm -rf /var/lib/apt/lists/*
 
-# Install Python deps first (layer cached)
+# Install only backend deps
 COPY requirements.backend.txt ./requirements.txt
 RUN python -m pip install --upgrade pip \
  && pip install -r requirements.txt
 
-# Then your code
+# App code
 COPY . .
 
-# Bind where Fly expects
 ENV PORT=8080
 EXPOSE 8080
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
