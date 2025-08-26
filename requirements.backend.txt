@@ -1,0 +1,12 @@
+fastapi>=0.111,<0.116
+uvicorn[standard]>=0.30,<0.31
+
+openai>=1.40,<2
+requests>=2.32,<3
+
+python-dotenv>=1.0,<2
+twilio>=9,<10
+sse-starlette>=2,<3
+python-multipart>=0.0.9,<0.0.10
+aiofiles>=24,<25
+httpx>=0.27,<0.28
