@@ -1,12 +1,3 @@
-app = "ai-vendbot"
-primary_region = "sjc"
-
-[env]
-  PORT = "8080"
-
-[build]
-  dockerfile = "Dockerfile"
-
 [http_service]
   internal_port = 8080
   force_https = true
