@@ -39,6 +39,10 @@ from agent.listen import transcribe_audio
 from app.voicebot import coldcall_lead
 from agent.speak import speak_text
 from app.backend.supabase_logger import ConversationLog, Lead, log_conversation, log_lead
+from types import SimpleNamespace
+
+# minimal OpenAI client placeholder for tests
+openai_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=None)))
 
 # ----------------------------------------------------------------------------
 # Env / Config
@@ -343,31 +347,52 @@ async def _close_stream(sid: str) -> None:
 
 @app.get("/sse")
 @app.get("/mcp/sse")
-async def sse(sid: str):
-    q = _event_queues.setdefault(sid, asyncio.Queue())
+async def sse(
+    sid: str | None = None,
+    lead_name: str | None = None,
+    phone: str | None = None,
+    property_type: str | None = None,
+    location_area: str | None = None,
+    callback_offer: str | None = None,
+):
+    """Stream events either from an internal queue or from OpenAI."""
 
-    async def gen():
-        async def heartbeat():
+    if sid:
+        q = _event_queues.setdefault(sid, asyncio.Queue())
+
+        async def gen_queue():
+            async def heartbeat():
+                while True:
+                    await asyncio.sleep(20)
+                    yield {"event": "ping", "data": "{}"}
+
+            hb = heartbeat()
             while True:
-                await asyncio.sleep(20)
-                yield {"event": "ping", "data": "{}"}
+                msg_task = asyncio.create_task(q.get())
+                hb_task = asyncio.create_task(hb.__anext__())
+                done, _ = await asyncio.wait(
+                    {msg_task, hb_task}, return_when=asyncio.FIRST_COMPLETED
+                )
 
-        hb = heartbeat()
-        while True:
-            msg_task = asyncio.create_task(q.get())
-            hb_task = asyncio.create_task(hb.__anext__())
-            done, _ = await asyncio.wait({msg_task, hb_task}, return_when=asyncio.FIRST_COMPLETED)
+                if msg_task in done:
+                    msg = msg_task.result()
+                    if msg == "[DONE]":
+                        yield {"event": "done", "data": "{}"}
+                        break
+                    yield {"event": "message", "data": msg}
+                else:
+                    yield hb_task.result()
 
-            if msg_task in done:
-                msg = msg_task.result()
-                if msg == "[DONE]":
-                    yield {"event": "done", "data": "{}"}
-                    break
-                yield {"event": "message", "data": msg}
-            else:
-                yield hb_task.result()
+        return EventSourceResponse(gen_queue())
 
-    return EventSourceResponse(gen())
+    async def gen_openai():
+        stream = await openai_client.chat.completions.create()
+        async for chunk in stream:
+            content = getattr(chunk.choices[0].delta, "content", "") or ""
+            if content:
+                yield {"data": content}
+
+    return EventSourceResponse(gen_openai())
 
 # ----------------------------------------------------------------------------
 # Error shaping

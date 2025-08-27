@@ -11,6 +11,9 @@ from app.backend.supabase_logger import (
     log_conversation,
     Lead,
     log_lead,
+    LeadScript,
+    log_script,
+    get_script,
 )
 
 
@@ -81,4 +84,63 @@ async def test_log_lead_posts_payload(monkeypatch):
 
     assert captured["url"] == "https://example.supabase.co/rest/v1/leads"
     assert captured["json"]["name"] == "Alex"
+
+
+@pytest.mark.asyncio
+async def test_log_script_posts_payload(monkeypatch):
+    """Verify that a lead script is sent to Supabase."""
+
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_KEY", "testkey")
+
+    captured = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["json"] = json.loads(request.content.decode())
+        return httpx.Response(201)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        script = LeadScript(
+            lead_phone="123",
+            script_id="default",
+            script_text="hello",
+        )
+        await log_script(script, client=client)
+
+    assert (
+        captured["url"]
+        == "https://example.supabase.co/rest/v1/lead_scripts?on_conflict=lead_phone,script_id"
+    )
+    assert captured["json"]["script_text"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_get_script_returns_model(monkeypatch):
+    """Ensure stored scripts are retrieved correctly."""
+
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_KEY", "testkey")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "lead_phone": "123",
+                    "script_id": "default",
+                    "script_text": "hello",
+                    "created_at": "2024-01-01T00:00:00+00:00",
+                    "updated_at": "2024-01-01T00:00:00+00:00",
+                }
+            ],
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        script = await get_script("123", client=client)
+
+    assert script is not None
+    assert script.script_text == "hello"
 
