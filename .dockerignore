@@ -1,6 +1,20 @@
+# Venvs & caches
 .venv
 venv
 __pycache__
 *.pyc
-.git
+.cache
+.dist
+build
 node_modules
+
+# Git & local config
+.git
+.gitignore
+.env
+.env.*
+secrets.toml
+.streamlit
+
+# Tests/UI-only assets
+*.log

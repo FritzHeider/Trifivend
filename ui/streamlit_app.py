@@ -1,8 +1,10 @@
 # ui/streamlit_app.py
 import json
 import time
+import asyncio
 import requests
 import streamlit as st
+from app.backend.supabase_logger import LeadScript, log_script, get_script
 
 # ---- Config ---------------------------------------------------------------
 BACKEND_URL = st.secrets.get("BACKEND_URL", "http://localhost:8080")  # e.g., https://ai-vendbot.fly.dev
@@ -15,6 +17,10 @@ if "messages" not in st.session_state:
     st.session_state.messages = []  # [{role: "user"|"assistant"|"system", content: str}]
 if "call_sid" not in st.session_state:
     st.session_state.call_sid = None
+if "script_text" not in st.session_state:
+    st.session_state.script_text = ""
+if "loaded_phone" not in st.session_state:
+    st.session_state.loaded_phone = None
 
 # ---- Helpers --------------------------------------------------------------
 def add_msg(role: str, content: str):
@@ -66,7 +72,36 @@ with st.form("lead_form", clear_on_submit=False):
         lead_phone = st.text_input("Lead phone (E.164)", "+14155550123")
         callback_offer = st.text_input("Callback offer", "schedule a free design session")
 
-    submitted = st.form_submit_button("Start Call")
+    if lead_phone != st.session_state.loaded_phone:
+        try:
+            existing = asyncio.run(get_script(lead_phone))
+            st.session_state.script_text = (
+                existing.script_text if existing else ""
+            )
+        except Exception:
+            st.session_state.script_text = ""
+        st.session_state.loaded_phone = lead_phone
+
+    script_text = st.text_area("Call script", key="script_text")
+
+    col_save, col_call = st.columns(2)
+    with col_save:
+        save_script = st.form_submit_button("Save Script")
+    with col_call:
+        submitted = st.form_submit_button("Start Call")
+
+    if save_script:
+        asyncio.run(
+            log_script(
+                LeadScript(
+                    lead_phone=lead_phone,
+                    script_id="default",
+                    script_text=script_text,
+                )
+            )
+        )
+        add_msg("assistant", "💾 Script saved.")
+
     if submitted:
         try:
             add_msg("system", f"Dialing {lead_phone} ({lead_name})…")
