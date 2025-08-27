@@ -33,6 +33,7 @@ from fastapi.responses import (
 from pydantic import BaseModel, Field, validator
 from sse_starlette.sse import EventSourceResponse
 from twilio.rest import Client as TwilioClient
+from openai import AsyncOpenAI
 
 # ---- your modules ----------------------------------------------------------
 from agent.listen import transcribe_audio
@@ -55,6 +56,19 @@ APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8080").rstrip("/")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
 TWILIO_NUMBER = os.getenv("TWILIO_NUMBER", "").strip()
+
+# Simple script registry mapping IDs to opening lines. Additional scripts can
+# be added here or supplied by clients via ``script_id``.
+SCRIPTS = {
+    "default": {
+        "opening_line": (
+            "Hi, this is Ava from Trifivend. Are you the right person to speak with "
+            "about smart vending solutions?"
+        )
+    }
+}
+
+openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
 
 def twilio_client() -> TwilioClient:
     if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_NUMBER):
@@ -89,6 +103,8 @@ class CallRequest(BaseModel):
     property_type: str
     location_area: str
     callback_offer: str
+    script_id: Optional[str] = None
+    system_prompt: Optional[str] = None
 
     class Config:
         allow_population_by_field_name = True  # lets clients send "to"
@@ -224,8 +240,21 @@ async def call_lead(body: CallRequest, client: TwilioClient = Depends(twilio_cli
     except Exception:
         pass
 
-    # seed SSE stream
-    await _enqueue(call.sid, {"event": "initiated", "sid": call.sid, "to": body.to})
+    # persist call configuration and seed SSE stream with script/prompt details
+    _call_configs[call.sid] = {
+        "script_id": body.script_id,
+        "system_prompt": body.system_prompt,
+    }
+    await _enqueue(
+        call.sid,
+        {
+            "event": "initiated",
+            "sid": call.sid,
+            "to": body.to,
+            "script_id": body.script_id,
+            "system_prompt": body.system_prompt,
+        },
+    )
 
     return {"call_sid": call.sid, "status": getattr(call, "status", "queued")}
 
@@ -233,13 +262,39 @@ async def call_lead(body: CallRequest, client: TwilioClient = Depends(twilio_cli
 # Twilio <Gather> voice webhook (absolute URLs)
 # ----------------------------------------------------------------------------
 @app.post("/twilio-voice")
-async def twilio_voice(SpeechResult: str = Form(None)):
+async def twilio_voice(
+    SpeechResult: str = Form(None), CallSid: str = Form("")
+):
+    sid = (CallSid or "").strip()
+    cfg = _call_configs.get(sid, {})
+    script_id = cfg.get("script_id") or "default"
+    system_prompt = cfg.get("system_prompt")
+    opening_line = SCRIPTS.get(script_id, SCRIPTS["default"])["opening_line"]
+
     if SpeechResult:
-        reply = await run_in_threadpool(
-            coldcall_lead, [{"role": "user", "content": SpeechResult}]
-        )
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        if script_id and script_id != "default":
+            messages.append({"role": "system", "content": f"Use the {script_id} script."})
+        messages.append({"role": "user", "content": SpeechResult})
+
+        reply = await run_in_threadpool(coldcall_lead, messages)
         await run_in_threadpool(speak_text, reply)
         play_url = f"{APP_BASE_URL}/audio/response.mp3"
+
+        await _enqueue(
+            sid,
+            {
+                "event": "reply",
+                "sid": sid,
+                "user": SpeechResult,
+                "bot_reply": reply,
+                "script_id": script_id,
+                "system_prompt": system_prompt,
+            },
+        )
+
         twiml = f"""
 <Response>
   <Play>{play_url}</Play>
@@ -250,7 +305,7 @@ async def twilio_voice(SpeechResult: str = Form(None)):
     else:
         twiml = f"""
 <Response>
-  <Say>Hi, this is Ava from Trifivend. Are you the right person to speak with about smart vending solutions?</Say>
+  <Say>{opening_line}</Say>
   <Gather input="speech" action="{APP_BASE_URL}/twilio-voice" method="POST" timeout="5" speechTimeout="auto">
     <Say>I'm listening...</Say>
   </Gather>
@@ -268,8 +323,17 @@ async def status_webhook(request: Request):
 
     if not sid:
         return PlainTextResponse("missing CallSid", status_code=200)
-
-    await _enqueue(sid, {"event": "status", "sid": sid, "status": call_status})
+    cfg = _call_configs.get(sid, {})
+    await _enqueue(
+        sid,
+        {
+            "event": "status",
+            "sid": sid,
+            "status": call_status,
+            "script_id": cfg.get("script_id"),
+            "system_prompt": cfg.get("system_prompt"),
+        },
+    )
 
     # non-blocking log
     try:
@@ -309,6 +373,8 @@ async def call_end(sid: str, client: TwilioClient = Depends(twilio_client)):
 # ----------------------------------------------------------------------------
 # SSE (per-call) with heartbeat to survive proxies
 # ----------------------------------------------------------------------------
+# Stores per-call configuration (script_id/system_prompt)
+_call_configs: Dict[str, Dict[str, Optional[str]]] = {}
 _event_queues: Dict[str, asyncio.Queue[str]] = {}
 
 async def _enqueue(sid: str, payload: dict) -> None:
@@ -322,34 +388,59 @@ async def _close_stream(sid: str) -> None:
     q = _event_queues.get(sid)
     if q:
         await q.put("[DONE]")
+    _event_queues.pop(sid, None)
+    _call_configs.pop(sid, None)
 
 @app.get("/sse")
 @app.get("/mcp/sse")
-async def sse(sid: str):
-    q = _event_queues.setdefault(sid, asyncio.Queue())
+async def sse(
+    sid: Optional[str] = None,
+    lead_name: Optional[str] = None,
+    phone: Optional[str] = None,
+    property_type: Optional[str] = None,
+    location_area: Optional[str] = None,
+    callback_offer: Optional[str] = None,
+):
+    if sid:
+        q = _event_queues.setdefault(sid, asyncio.Queue())
 
-    async def gen():
-        async def heartbeat():
+        async def gen():
+            async def heartbeat():
+                while True:
+                    await asyncio.sleep(20)
+                    yield {"event": "ping", "data": "{}"}
+
+            hb = heartbeat()
             while True:
-                await asyncio.sleep(20)
-                yield {"event": "ping", "data": "{}"}
+                msg_task = asyncio.create_task(q.get())
+                hb_task = asyncio.create_task(hb.__anext__())
+                done, _ = await asyncio.wait(
+                    {msg_task, hb_task}, return_when=asyncio.FIRST_COMPLETED
+                )
 
-        hb = heartbeat()
-        while True:
-            msg_task = asyncio.create_task(q.get())
-            hb_task = asyncio.create_task(hb.__anext__())
-            done, _ = await asyncio.wait({msg_task, hb_task}, return_when=asyncio.FIRST_COMPLETED)
+                if msg_task in done:
+                    msg = msg_task.result()
+                    if msg == "[DONE]":
+                        yield {"event": "done", "data": "{}"}
+                        break
+                    yield {"event": "message", "data": msg}
+                else:
+                    yield hb_task.result()
 
-            if msg_task in done:
-                msg = msg_task.result()
-                if msg == "[DONE]":
-                    yield {"event": "done", "data": "{}"}
-                    break
-                yield {"event": "message", "data": msg}
-            else:
-                yield hb_task.result()
+        return EventSourceResponse(gen())
 
-    return EventSourceResponse(gen())
+    async def gen_openai():
+        response = await openai_client.chat.completions.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": "hello"}],
+            stream=True,
+        )
+        async for chunk in response:
+            delta = getattr(chunk.choices[0].delta, "content", None)
+            if delta:
+                yield {"event": "message", "data": delta}
+
+    return EventSourceResponse(gen_openai())
 
 # ----------------------------------------------------------------------------
 # Error shaping
