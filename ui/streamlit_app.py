@@ -1,5 +1,6 @@
 # ui/streamlit_app.py
 import json
+import os
 import time
 import asyncio
 import requests
@@ -17,8 +18,18 @@ if "messages" not in st.session_state:
     st.session_state.messages = []  # [{role: "user"|"assistant"|"system", content: str}]
 if "call_sid" not in st.session_state:
     st.session_state.call_sid = None
-if "script_text" not in st.session_state:
-    st.session_state.script_text = ""
+ default_fields = {
+    "lead_name": "Alex",
+    "property_type": "apartment",
+    "location_area": "San Francisco",
+    "lead_phone": "+14155550123",
+    "callback_offer": "schedule a free design session",
+    "system_prompt": "",
+}
+for k, v in default_fields.items():
+    st.session_state.setdefault(k, v)
+if "scripts" not in st.session_state:
+    st.session_state.scripts = []
 if "loaded_phone" not in st.session_state:
     st.session_state.loaded_phone = None
 
@@ -31,7 +42,78 @@ def render_history():
         with st.chat_message(m["role"]):
             st.write(m["content"])
 
-def start_call(lead_phone: str, lead_name: str, property_type: str, location_area: str, callback_offer: str):
+def fetch_call_scripts():
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_ANON_KEY")
+    if not supabase_url or not supabase_key:
+        return []
+    try:
+        r = requests.get(
+            f"{supabase_url}/rest/v1/call_scripts",
+            headers={
+                "apikey": supabase_key,
+                "Authorization": f"Bearer {supabase_key}",
+            },
+            params={"select": "id,name"},
+            timeout=10,
+        )
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"Supabase script fetch error: {e}")
+        return []
+
+
+def fetch_lead_by_phone(phone: str):
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_ANON_KEY")
+    if not supabase_url or not supabase_key:
+        return None
+    try:
+        r = requests.get(
+            f"{supabase_url}/rest/v1/leads",
+            headers={
+                "apikey": supabase_key,
+                "Authorization": f"Bearer {supabase_key}",
+            },
+            params={
+                "select": "name,property_type,location_area,callback_offer",
+                "phone": f"eq.{phone}",
+            },
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data[0] if data else None
+    except Exception as e:
+        print(f"Supabase lead fetch error: {e}")
+        return None
+
+
+def lookup_lead():
+    lead = fetch_lead_by_phone(st.session_state.lead_phone)
+    if lead:
+        st.session_state.lead_name = lead.get("name", st.session_state.lead_name)
+        st.session_state.property_type = lead.get(
+            "property_type", st.session_state.property_type
+        )
+        st.session_state.location_area = lead.get(
+            "location_area", st.session_state.location_area
+        )
+        st.session_state.callback_offer = lead.get(
+            "callback_offer", st.session_state.callback_offer
+        )
+
+
+def start_call(
+    lead_phone: str,
+    lead_name: str,
+    property_type: str,
+    location_area: str,
+    callback_offer: str,
+    script_id: str | None,
+    system_prompt: str | None,
+):
     # hits FastAPI /call (server holds Twilio creds)
     resp = requests.post(
         f"{BACKEND_URL}/call",
@@ -41,6 +123,8 @@ def start_call(lead_phone: str, lead_name: str, property_type: str, location_are
             "property_type": property_type,
             "location_area": location_area,
             "callback_offer": callback_offer,
+            "script_id": script_id,
+            "system_prompt": system_prompt,
         },
         timeout=30,
     )
@@ -62,15 +146,29 @@ def stream_events(call_sid: str):
                 yield evt
 
 # ---- UI: lead form --------------------------------------------------------
+if not st.session_state.scripts:
+    st.session_state.scripts = fetch_call_scripts()
+script_map = {s.get("name", s.get("id")): s.get("id") for s in st.session_state.scripts}
+
 with st.form("lead_form", clear_on_submit=False):
     col1, col2 = st.columns(2)
     with col1:
-        lead_name = st.text_input("Lead name", "Alex")
-        property_type = st.text_input("Property type", "apartment")
-        location_area = st.text_input("Location area", "San Francisco")
+        lead_name = st.text_input("Lead name", key="lead_name")
+        property_type = st.text_input("Property type", key="property_type")
+        location_area = st.text_input("Location area", key="location_area")
     with col2:
-        lead_phone = st.text_input("Lead phone (E.164)", "+14155550123")
-        callback_offer = st.text_input("Callback offer", "schedule a free design session")
+        lead_phone = st.text_input(
+            "Lead phone (E.164)", key="lead_phone", on_change=lookup_lead
+        )
+        callback_offer = st.text_input("Callback offer", key="callback_offer")
+        if script_map:
+            script_label = st.selectbox(
+                "Call script", list(script_map.keys()), key="script_label"
+            )
+            script_id = script_map.get(script_label)
+        else:
+            script_id = st.text_input("Call script ID", key="script_id")
+        system_prompt = st.text_area("Custom system prompt", key="system_prompt")
 
     if lead_phone != st.session_state.loaded_phone:
         try:
@@ -106,7 +204,13 @@ with st.form("lead_form", clear_on_submit=False):
         try:
             add_msg("system", f"Dialing {lead_phone} ({lead_name})…")
             st.session_state.call_sid = start_call(
-                lead_phone, lead_name, property_type, location_area, callback_offer
+                lead_phone,
+                lead_name,
+                property_type,
+                location_area,
+                callback_offer,
+                script_id,
+                system_prompt,
             )
             add_msg("system", f"Call SID: {st.session_state.call_sid}")
         except Exception as e:
