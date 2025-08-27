@@ -38,6 +38,20 @@ class Lead(BaseModel):
     )
 
 
+class LeadScript(BaseModel):
+    """Persistence model for a lead's calling script."""
+
+    lead_phone: str
+    script_id: str
+    script_text: str
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc), alias="created_at"
+    )
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc), alias="updated_at"
+    )
+
+
 async def log_conversation(
     log: ConversationLog, *, client: Optional[httpx.AsyncClient] = None
 ) -> None:
@@ -114,5 +128,88 @@ async def log_lead(lead: Lead, *, client: Optional[httpx.AsyncClient] = None) ->
             await client.aclose()
 
 
-__all__ = ["ConversationLog", "log_conversation", "Lead", "log_lead"]
+async def log_script(
+    script: LeadScript, *, client: Optional[httpx.AsyncClient] = None
+) -> None:
+    """Persist ``script`` information to Supabase."""
+
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+
+    if not supabase_url or not supabase_key:
+        print("⚠️ Supabase credentials missing — skipping script log.")
+        return
+
+    owns_client = False
+    if client is None:
+        client = httpx.AsyncClient(timeout=10.0)
+        owns_client = True
+
+    try:
+        await client.post(
+            f"{supabase_url}/rest/v1/lead_scripts?on_conflict=lead_phone,script_id",
+            headers={
+                "apikey": supabase_key,
+                "Authorization": f"Bearer {supabase_key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            },
+            json=script.model_dump(mode="json"),
+        )
+    except Exception as e:  # pragma: no cover - network errors just logged
+        print(f"Supabase script log error: {e}")
+    finally:
+        if owns_client:
+            await client.aclose()
+
+
+async def get_script(
+    lead_phone: str, *, client: Optional[httpx.AsyncClient] = None
+) -> Optional[LeadScript]:
+    """Retrieve stored script for ``lead_phone`` from Supabase."""
+
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+
+    if not supabase_url or not supabase_key:
+        print("⚠️ Supabase credentials missing — skipping script fetch.")
+        return None
+
+    owns_client = False
+    if client is None:
+        client = httpx.AsyncClient(timeout=10.0)
+        owns_client = True
+
+    try:
+        resp = await client.get(
+            f"{supabase_url}/rest/v1/lead_scripts",
+            headers={
+                "apikey": supabase_key,
+                "Authorization": f"Bearer {supabase_key}",
+                "Content-Type": "application/json",
+            },
+            params={"lead_phone": f"eq.{lead_phone}", "limit": 1},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data:
+            return LeadScript.model_validate(data[0])
+        return None
+    except Exception as e:  # pragma: no cover - network errors just logged
+        print(f"Supabase get script error: {e}")
+        return None
+    finally:
+        if owns_client:
+            await client.aclose()
+
+
+__all__ = [
+    "ConversationLog",
+    "log_conversation",
+    "Lead",
+    "log_lead",
+    "LeadScript",
+    "log_script",
+    "get_script",
+]
 
