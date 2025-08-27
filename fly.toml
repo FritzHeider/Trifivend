@@ -1,8 +1,5 @@
-app = "ai-vendbot"
+app = "ai-vendbot"     # 👈 this must match your Fly app name
 primary_region = "sjc"
-
-[env]
-  PORT = "8080"
 
 [build]
   dockerfile = "Dockerfile"

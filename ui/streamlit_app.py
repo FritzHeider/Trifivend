@@ -2,8 +2,10 @@
 import json
 import os
 import time
+import asyncio
 import requests
 import streamlit as st
+from app.backend.supabase_logger import LeadScript, log_script, get_script
 
 # ---- Config ---------------------------------------------------------------
 BACKEND_URL = st.secrets.get("BACKEND_URL", "http://localhost:8080")  # e.g., https://ai-vendbot.fly.dev
@@ -16,7 +18,7 @@ if "messages" not in st.session_state:
     st.session_state.messages = []  # [{role: "user"|"assistant"|"system", content: str}]
 if "call_sid" not in st.session_state:
     st.session_state.call_sid = None
-default_fields = {
+ default_fields = {
     "lead_name": "Alex",
     "property_type": "apartment",
     "location_area": "San Francisco",
@@ -28,6 +30,8 @@ for k, v in default_fields.items():
     st.session_state.setdefault(k, v)
 if "scripts" not in st.session_state:
     st.session_state.scripts = []
+if "loaded_phone" not in st.session_state:
+    st.session_state.loaded_phone = None
 
 # ---- Helpers --------------------------------------------------------------
 def add_msg(role: str, content: str):
@@ -166,7 +170,36 @@ with st.form("lead_form", clear_on_submit=False):
             script_id = st.text_input("Call script ID", key="script_id")
         system_prompt = st.text_area("Custom system prompt", key="system_prompt")
 
-    submitted = st.form_submit_button("Start Call")
+    if lead_phone != st.session_state.loaded_phone:
+        try:
+            existing = asyncio.run(get_script(lead_phone))
+            st.session_state.script_text = (
+                existing.script_text if existing else ""
+            )
+        except Exception:
+            st.session_state.script_text = ""
+        st.session_state.loaded_phone = lead_phone
+
+    script_text = st.text_area("Call script", key="script_text")
+
+    col_save, col_call = st.columns(2)
+    with col_save:
+        save_script = st.form_submit_button("Save Script")
+    with col_call:
+        submitted = st.form_submit_button("Start Call")
+
+    if save_script:
+        asyncio.run(
+            log_script(
+                LeadScript(
+                    lead_phone=lead_phone,
+                    script_id="default",
+                    script_text=script_text,
+                )
+            )
+        )
+        add_msg("assistant", "💾 Script saved.")
+
     if submitted:
         try:
             add_msg("system", f"Dialing {lead_phone} ({lead_name})…")
