@@ -1,4 +1,4 @@
-#!/Users/space/trifivend/venv/bin/python
+#!/Users/space/trifivend/venv/bin/python3.13
 # -*- coding: utf-8 -*-
 import re
 import sys
