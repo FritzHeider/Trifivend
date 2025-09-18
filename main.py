@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -29,6 +30,7 @@ from fastapi.responses import (
     JSONResponse,
     PlainTextResponse,
     Response,
+    StreamingResponse,
 )
 from pydantic import BaseModel, Field, validator
 from sse_starlette.sse import EventSourceResponse
@@ -37,8 +39,8 @@ from openai import AsyncOpenAI
 
 # ---- your modules ----------------------------------------------------------
 from agent.listen import transcribe_audio
-from app.voicebot import coldcall_lead
-from agent.speak import speak_text
+from app.voicebot import coldcall_lead, stream_coldcall_reply
+from agent.speak import speak_text, stream_text_to_speech
 from app.backend.supabase_logger import ConversationLog, Lead, log_conversation, log_lead
 from types import SimpleNamespace
 
@@ -101,7 +103,7 @@ app.add_middleware(
 E164_RE = re.compile(r"^\+\d{8,15}$")
 class CallRequest(BaseModel):
     # Accept both "to" (preferred) and legacy "phone"
-     to: str = Field(..., alias="phone", description="E.164, e.g. +14155550123")
+    to: str = Field(..., alias="phone", description="E.164, e.g. +14155550123")
     lead_name: str
     property_type: str
     location_area: str
@@ -226,6 +228,22 @@ async def serve_audio():
         return JSONResponse({"error": "No audio available"}, status_code=404)
     return FileResponse(path, media_type="audio/mpeg")
 
+
+@app.get("/audio/response-stream")
+async def stream_audio_response(sid: str):
+    queue = _audio_streams.get(sid)
+    if queue is None:
+        return JSONResponse({"error": "No active stream"}, status_code=404)
+
+    async def iterator():
+        while True:
+            chunk = await queue.get()
+            if chunk is None:
+                break
+            yield chunk
+
+    return StreamingResponse(iterator(), media_type="audio/mpeg")
+
 # ----------------------------------------------------------------------------
 # Outbound call (JSON body)  <<< THIS FIXES YOUR 422s
 # ----------------------------------------------------------------------------
@@ -295,6 +313,11 @@ async def twilio_voice(
     opening_line = SCRIPTS.get(script_id, SCRIPTS["default"])["opening_line"]
 
     if SpeechResult:
+        if not sid:
+            raise HTTPException(status_code=400, detail="Missing CallSid for streaming response")
+
+        await _stop_audio_stream(sid)
+
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -302,22 +325,24 @@ async def twilio_voice(
             messages.append({"role": "system", "content": f"Use the {script_id} script."})
         messages.append({"role": "user", "content": SpeechResult})
 
-        reply = await run_in_threadpool(coldcall_lead, messages)
-        await run_in_threadpool(speak_text, reply)
-        play_url = f"{APP_BASE_URL}/audio/response.mp3"
+        queue: asyncio.Queue[Optional[bytes]] = asyncio.Queue()
+        _audio_streams[sid] = queue
+        output_path = os.path.join("/tmp", f"response-{sid}.mp3")
 
-        await _enqueue(
-            sid,
-            {
-                "event": "reply",
-                "sid": sid,
-                "user": SpeechResult,
-                "bot_reply": reply,
-                "script_id": script_id,
-                "system_prompt": system_prompt,
-            },
+        task = asyncio.create_task(
+            _stream_reply_audio(
+                sid=sid,
+                queue=queue,
+                messages=messages,
+                user_input=SpeechResult,
+                script_id=script_id,
+                system_prompt=system_prompt,
+                output_path=output_path,
+            )
         )
+        _audio_stream_tasks[sid] = task
 
+        play_url = f"{APP_BASE_URL}/audio/response-stream?sid={sid}"
         twiml = f"""
 <Response>
   <Play>{play_url}</Play>
@@ -399,6 +424,93 @@ async def call_end(sid: str, client: TwilioClient = Depends(twilio_client)):
 # Stores per-call configuration (script_id/system_prompt)
 _call_configs: Dict[str, Dict[str, Optional[str]]] = {}
 _event_queues: Dict[str, asyncio.Queue[str]] = {}
+_audio_streams: Dict[str, asyncio.Queue[Optional[bytes]]] = {}
+_audio_stream_tasks: Dict[str, asyncio.Task] = {}
+
+
+async def _stop_audio_stream(sid: str) -> None:
+    queue = _audio_streams.pop(sid, None)
+    if queue is not None:
+        await queue.put(None)
+
+    task = _audio_stream_tasks.pop(sid, None)
+    if task is not None:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+
+async def _stream_reply_audio(
+    *,
+    sid: str,
+    queue: asyncio.Queue[Optional[bytes]],
+    messages: list[dict[str, str]],
+    user_input: str,
+    script_id: str,
+    system_prompt: Optional[str],
+    output_path: str,
+) -> None:
+    append = False
+    parts: list[str] = []
+
+    try:
+        async for chunk in stream_coldcall_reply(messages):
+            text = chunk.strip()
+            if not text:
+                continue
+
+            parts.append(text)
+            wrote_audio = False
+            async for audio_chunk in stream_text_to_speech(
+                text,
+                output_path=output_path,
+                append=append,
+            ):
+                wrote_audio = True
+                await queue.put(audio_chunk)
+            if wrote_audio:
+                append = True
+
+        final_text = " ".join(parts).strip()
+        if final_text:
+            await _enqueue(
+                sid,
+                {
+                    "event": "reply",
+                    "sid": sid,
+                    "user": user_input,
+                    "bot_reply": final_text,
+                    "script_id": script_id,
+                    "system_prompt": system_prompt,
+                },
+            )
+
+            try:
+                await log_conversation(
+                    ConversationLog(user_input=user_input, bot_reply=final_text)
+                )
+            except Exception:
+                pass
+
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        await _enqueue(
+            sid,
+            {
+                "event": "error",
+                "sid": sid,
+                "detail": f"Streaming pipeline failed: {exc}",
+            },
+        )
+    finally:
+        await queue.put(None)
+        if _audio_streams.get(sid) is queue:
+            _audio_streams.pop(sid, None)
+        current = asyncio.current_task()
+        if current is not None and _audio_stream_tasks.get(sid) is current:
+            _audio_stream_tasks.pop(sid, None)
 
 async def _enqueue(sid: str, payload: dict) -> None:
     q = _event_queues.get(sid)
@@ -413,6 +525,7 @@ async def _close_stream(sid: str) -> None:
         await q.put("[DONE]")
     _event_queues.pop(sid, None)
     _call_configs.pop(sid, None)
+    await _stop_audio_stream(sid)
 
 @app.get("/sse")
 @app.get("/mcp/sse")
