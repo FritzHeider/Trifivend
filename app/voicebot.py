@@ -3,7 +3,7 @@
 import os
 from openai import OpenAI
 
-MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4")
+MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 

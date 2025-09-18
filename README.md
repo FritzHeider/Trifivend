@@ -49,7 +49,7 @@ cp .env.example .env
 Key variables and what they are for:
 
 - `OPENAI_API_KEY` – OpenAI API key.
-- `OPENAI_MODEL` – model to use (default `gpt-4`).
+- `OPENAI_MODEL` – model to use (default `gpt-4o-mini`; faster models are recommended for live calls).
 - `ELEVEN_API_KEY` – ElevenLabs API key for TTS.
 - `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` – optional Supabase logging.
 - `TWILIO_ACCOUNT_SID` and `TWILIO_AUTH_TOKEN` – found in the Twilio console under
