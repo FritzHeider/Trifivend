@@ -26,7 +26,10 @@ async def test_transcribe_concurrent(monkeypatch):
     monkeypatch.setattr(main, "transcribe_audio", fake_transcribe_audio)
     monkeypatch.setattr(main, "coldcall_lead", fake_coldcall)
     monkeypatch.setattr(main, "speak_text", lambda text: None)
-    monkeypatch.setattr(main, "log_conversation", lambda entry: None)
+    async def fake_log_conversation(entry):
+        return None
+
+    monkeypatch.setattr(main, "log_conversation", fake_log_conversation)
 
     transport = ASGITransport(app=main.app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -54,7 +57,10 @@ async def test_sse_concurrent(monkeypatch):
     monkeypatch.setattr(
         main.openai_client.chat.completions, "create", fake_create
     )
-    monkeypatch.setattr(main, "log_conversation", lambda *a, **k: None)
+    async def fake_log_conversation(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(main, "log_conversation", fake_log_conversation)
 
     transport = ASGITransport(app=main.app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
