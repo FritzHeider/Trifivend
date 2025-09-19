@@ -4,11 +4,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import re
 import shutil
 import tempfile
-from typing import Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from dotenv import load_dotenv
 from fastapi import (
@@ -75,6 +76,27 @@ SCRIPTS = {
 }
 
 openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+
+logger = logging.getLogger(__name__)
+
+
+def _schedule_background_coroutine(
+    coro_func: Callable[..., Awaitable[Any]],
+    *args: Any,
+    description: str,
+    background_tasks: BackgroundTasks | None = None,
+    **kwargs: Any,
+) -> None:
+    async def runner() -> None:
+        try:
+            await coro_func(*args, **kwargs)
+        except Exception:
+            logger.exception("Background task '%s' failed", description)
+
+    if background_tasks is not None:
+        background_tasks.add_task(runner)
+    else:
+        asyncio.create_task(runner())
 
 def twilio_client() -> TwilioClient:
     if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_NUMBER):
@@ -202,10 +224,11 @@ async def transcribe(
 
         # schedule TTS + logging off the request thread
         background_tasks.add_task(run_in_threadpool, speak_text, bot_reply)
-        background_tasks.add_task(
-            run_in_threadpool,
+        _schedule_background_coroutine(
             log_conversation,
             ConversationLog(user_input=user_input, bot_reply=bot_reply),
+            description="conversation log",
+            background_tasks=background_tasks,
         )
 
         return {
@@ -248,7 +271,11 @@ async def stream_audio_response(sid: str):
 # Outbound call (JSON body)  <<< THIS FIXES YOUR 422s
 # ----------------------------------------------------------------------------
 @app.post("/call")
-async def call_lead(body: CallRequest, client: TwilioClient = Depends(twilio_client)):
+async def call_lead(
+    body: CallRequest,
+    background_tasks: BackgroundTasks,
+    client: TwilioClient = Depends(twilio_client),
+):
     voice_url = f"{APP_BASE_URL}/twilio-voice"  # absolute URL for Twilio
     status_cb = f"{APP_BASE_URL}/status"
 
@@ -268,18 +295,22 @@ async def call_lead(body: CallRequest, client: TwilioClient = Depends(twilio_cli
 
     # best-effort lead logging (non-blocking)
     try:
-        await run_in_threadpool(
-            log_lead,
-            Lead(
-                name=body.lead_name or "",
-                phone=body.to,
-                property_type=body.property_type or "",
-                location_area=body.location_area or "",
-                callback_offer=body.callback_offer or "",
-            ),
+        lead = Lead(
+            name=body.lead_name or "",
+            phone=body.to,
+            property_type=body.property_type or "",
+            location_area=body.location_area or "",
+            callback_offer=body.callback_offer or "",
         )
     except Exception:
         pass
+    else:
+        _schedule_background_coroutine(
+            log_lead,
+            lead,
+            description="lead log",
+            background_tasks=background_tasks,
+        )
 
     # persist call configuration and seed SSE stream with script/prompt details
     _call_configs[call.sid] = {
@@ -364,7 +395,7 @@ async def twilio_voice(
 # Twilio status callback (form-encoded)
 # ----------------------------------------------------------------------------
 @app.post("/status")
-async def status_webhook(request: Request):
+async def status_webhook(request: Request, background_tasks: BackgroundTasks):
     form = await request.form()
     sid = (form.get("CallSid") or "").strip()
     call_status = (form.get("CallStatus") or "").strip()
@@ -385,15 +416,19 @@ async def status_webhook(request: Request):
 
     # non-blocking log
     try:
-        await run_in_threadpool(
-            log_conversation,
-            ConversationLog(
-                user_input=f"[Twilio status] {sid}",
-                bot_reply=call_status or "(none)",
-            ),
+        log_entry = ConversationLog(
+            user_input=f"[Twilio status] {sid}",
+            bot_reply=call_status or "(none)",
         )
     except Exception:
         pass
+    else:
+        _schedule_background_coroutine(
+            log_conversation,
+            log_entry,
+            description="status log",
+            background_tasks=background_tasks,
+        )
 
     if call_status in {"completed", "failed", "busy", "no-answer", "canceled"}:
         await _close_stream(sid)
