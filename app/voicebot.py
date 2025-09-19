@@ -15,8 +15,12 @@ from openai import AsyncOpenAI
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 async_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+# Lower thresholds for faster first audio
 _SENTENCE_DELIMITERS = (".", "?", "!", "\n")
-_MAX_BUFFER_CHARS = 300
+_MIN_FLUSH_CHARS = 60     # ~1 short clause
+_MAX_FLUSH_CHARS = 80     # hard push to speak
+# First-turn token cap to avoid long monologues; tune per use case
+_FIRST_TURN_MAX_TOKENS = 90
 
 
 # -----------------------------------------------------------------------------
@@ -25,8 +29,9 @@ _MAX_BUFFER_CHARS = 300
 async def stream_coldcall_reply(
     messages: Sequence[dict],
     *,
-    temperature: float = 0.7,
+    temperature: float = 0.6,
     model: str = MODEL_NAME,
+    is_first_turn: bool = True,
 ) -> AsyncGenerator[str, None]:
     """Yield incremental text responses from the assistant.
 
@@ -35,15 +40,20 @@ async def stream_coldcall_reply(
     """
     buffer = ""
 
+    params = {
+        "model": model,
+        "messages": list(messages),
+        "temperature": temperature,
+        "stream": True,
+    }
+    if is_first_turn:
+        # Small opener for snappier TTS; you can follow with a continuation call if needed
+        params["max_tokens"] = _FIRST_TURN_MAX_TOKENS
+
     try:
         # Chat Completions remain supported (Responses API is the new default,
         # but this endpoint is still fine for text chat). :contentReference[oaicite:0]{index=0}
-        response = await async_client.chat.completions.create(
-            model=model,
-            messages=list(messages),
-            temperature=temperature,
-            stream=True,
-        )
+        response = await async_client.chat.completions.create(**params)
 
         async for chunk in response:
             # Defensive: some chunks may not include content deltas.
@@ -54,7 +64,10 @@ async def stream_coldcall_reply(
                 continue
 
             buffer += delta
-            if any(d in buffer for d in _SENTENCE_DELIMITERS) or len(buffer) > _MAX_BUFFER_CHARS:
+            if (
+                len(buffer) >= _MAX_FLUSH_CHARS
+                or any(d in buffer for d in _SENTENCE_DELIMITERS) and len(buffer) >= _MIN_FLUSH_CHARS
+            ):
                 flushed, buffer = buffer.strip(), ""
                 if flushed:
                     yield flushed
@@ -74,19 +87,26 @@ async def stream_coldcall_reply(
 async def _collect_reply(
     messages: Sequence[dict],
     *,
-    temperature: float = 0.7,
+    temperature: float = 0.6,
     model: str = MODEL_NAME,
+    is_first_turn: bool = True,
 ) -> str:
     parts: MutableSequence[str] = []
-    async for part in stream_coldcall_reply(messages, temperature=temperature, model=model):
+    async for part in stream_coldcall_reply(
+        messages,
+        temperature=temperature,
+        model=model,
+        is_first_turn=is_first_turn,
+    ):
         parts.append(part)
     return " ".join(parts).strip()
 
 
 def coldcall_lead(
     messages: List[dict],
-    temperature: float = 0.7,
+    temperature: float = 0.6,
     model: str = MODEL_NAME,
+    is_first_turn: bool = True,
 ) -> str:
     """Synchronous wrapper for legacy callers (tests, scripts).
 
@@ -105,6 +125,13 @@ def coldcall_lead(
         )
 
     try:
-        return asyncio.run(_collect_reply(messages, temperature=temperature, model=model))
+        return asyncio.run(
+            _collect_reply(
+                messages,
+                temperature=temperature,
+                model=model,
+                is_first_turn=is_first_turn,
+            )
+        )
     except Exception as e:
         raise RuntimeError(f"AI response failed: {e}") from e
