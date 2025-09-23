@@ -93,10 +93,16 @@ def _schedule_background_coroutine(
         except Exception:
             logger.exception("Background task '%s' failed", description)
 
-    if background_tasks is not None:
-        background_tasks.add_task(runner)
-    else:
+    try:
         asyncio.create_task(runner())
+    except RuntimeError:
+        if background_tasks is not None:
+            background_tasks.add_task(runner)
+        else:
+            logger.error(
+                "Unable to schedule background coroutine '%s': no running event loop",
+                description,
+            )
 
 def twilio_client() -> TwilioClient:
     if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_NUMBER):
