@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import AsyncGenerator
 from typing import Optional
 
@@ -61,6 +62,23 @@ def speak_text(
     return output_path
 
 
+_SHARED_TTS_CLIENT: httpx.AsyncClient | None = None
+
+
+def _get_tts_client() -> httpx.AsyncClient:
+    """Return a shared ``httpx.AsyncClient`` configured for low-latency streaming."""
+
+    global _SHARED_TTS_CLIENT
+    if _SHARED_TTS_CLIENT is None:
+        _SHARED_TTS_CLIENT = httpx.AsyncClient(
+            timeout=httpx.Timeout(60.0),
+            http2=True,
+            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            headers={"Connection": "keep-alive"},
+        )
+    return _SHARED_TTS_CLIENT
+
+
 async def stream_text_to_speech(
     text: str,
     *,
@@ -71,6 +89,7 @@ async def stream_text_to_speech(
     similarity_boost: float = 0.7,
     append: bool = False,
     client: Optional[httpx.AsyncClient] = None,
+    prebuffer_ms: float = 150.0,
 ) -> AsyncGenerator[bytes, None]:
     """Stream ElevenLabs audio while persisting it to disk.
 
@@ -113,23 +132,44 @@ async def stream_text_to_speech(
     if dirname:
         os.makedirs(dirname, exist_ok=True)
 
-    owns_client = False
     if client is None:
-        client = httpx.AsyncClient(timeout=httpx.Timeout(60.0))
-        owns_client = True
+        client = _get_tts_client()
 
     mode = "ab" if append else "wb"
     try:
         async with client.stream("POST", url, headers=headers, json=payload) as resp:
             resp.raise_for_status()
             async with aiofiles.open(output_path, mode) as file_obj:
+                first_emit = False
+                buffered: list[bytes] = []
+                buffered_size = 0
+                start_time: Optional[float] = None
+
                 async for chunk in resp.aiter_bytes():
                     if not chunk:
                         continue
+
                     await file_obj.write(chunk)
-                    yield chunk
+
+                    if not first_emit:
+                        buffered.append(chunk)
+                        buffered_size += len(chunk)
+                        if start_time is None:
+                            start_time = time.perf_counter()
+                        elapsed = time.perf_counter() - start_time
+                        # Emit once we have ~150ms of audio or ~12KB of data (~0.15s @ 64kbps).
+                        if elapsed >= prebuffer_ms / 1000.0 or buffered_size >= 12_000:
+                            for buffered_chunk in buffered:
+                                yield buffered_chunk
+                            buffered.clear()
+                            buffered_size = 0
+                            first_emit = True
+                    else:
+                        yield chunk
+
+                # Flush any trailing buffered audio if we never emitted.
+                if not first_emit:
+                    for buffered_chunk in buffered:
+                        yield buffered_chunk
     except Exception as e:  # pragma: no cover - network errors surface upstream
         raise RuntimeError(f"ElevenLabs streaming TTS failed: {str(e)}") from e
-    finally:
-        if owns_client:
-            await client.aclose()
