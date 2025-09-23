@@ -79,6 +79,26 @@ openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
 
 logger = logging.getLogger(__name__)
 
+BACKCHANNEL_DELAY_MS = float(os.getenv("BACKCHANNEL_DELAY_MS", "300"))
+BACKCHANNEL_TEXT = os.getenv("BACKCHANNEL_TEXT", "One sec…")
+CONTINUATION_SILENCE_SECONDS = float(os.getenv("CONTINUATION_SILENCE_SECONDS", "2.0"))
+SYSTEM_PROMPT_TOKEN_LIMIT = int(os.getenv("SYSTEM_PROMPT_TOKEN_LIMIT", "300"))
+GATHER_SPEECH_TIMEOUT = os.getenv("GATHER_SPEECH_TIMEOUT", "0.3")
+
+
+def _trim_system_prompt(prompt: str) -> str:
+    """Clamp custom system prompts to roughly ``SYSTEM_PROMPT_TOKEN_LIMIT`` tokens."""
+
+    if not prompt:
+        return ""
+
+    tokens = prompt.split()
+    if len(tokens) <= SYSTEM_PROMPT_TOKEN_LIMIT:
+        return prompt
+
+    trimmed = " ".join(tokens[:SYSTEM_PROMPT_TOKEN_LIMIT])
+    return trimmed
+
 
 def _schedule_background_coroutine(
     coro_func: Callable[..., Awaitable[Any]],
@@ -138,7 +158,7 @@ class CallRequest(BaseModel):
     callback_offer: str
     script_id: Optional[str] = None
     system_prompt: Optional[str] = None
- 
+
 
     class Config:
         # This line makes Pydantic accept either "to" OR "phone" in the body
@@ -151,6 +171,12 @@ class CallRequest(BaseModel):
         if not E164_RE.match(vv):
             raise ValueError("Invalid phone format. Use E.164 like +14155550123")
         return vv
+
+    @validator("system_prompt")
+    def _limit_prompt(cls, v: Optional[str]) -> Optional[str]:
+        if not v:
+            return v
+        return _trim_system_prompt(v)
 # class CallRequest(BaseModel):
 #     # Accept both "to" (preferred) and legacy "phone"
 #     to: str = Field(..., alias="phone", description="E.164, e.g. +14155550123")
@@ -322,6 +348,7 @@ async def call_lead(
     _call_configs[call.sid] = {
         "script_id": body.script_id,
         "system_prompt": body.system_prompt,
+        "turn": 0,
     }
     await _enqueue(
         call.sid,
@@ -353,11 +380,12 @@ async def twilio_voice(
         if not sid:
             raise HTTPException(status_code=400, detail="Missing CallSid for streaming response")
 
+        _mark_user_activity(sid)
         await _stop_audio_stream(sid)
 
         messages = []
         if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "system", "content": _trim_system_prompt(system_prompt)})
         if script_id and script_id != "default":
             messages.append({"role": "system", "content": f"Use the {script_id} script."})
         messages.append({"role": "user", "content": SpeechResult})
@@ -383,7 +411,7 @@ async def twilio_voice(
         twiml = f"""
 <Response>
   <Play>{play_url}</Play>
-  <Gather input="speech" action="{APP_BASE_URL}/twilio-voice" method="POST" timeout="5" speechTimeout="auto">
+  <Gather input="speech" action="{APP_BASE_URL}/twilio-voice" method="POST" timeout="5" speechTimeout="{GATHER_SPEECH_TIMEOUT}" partialResultCallback="{APP_BASE_URL}/twilio-partial" partialResultCallbackMethod="POST">
     <Say>...</Say>
   </Gather>
 </Response>"""
@@ -391,11 +419,37 @@ async def twilio_voice(
         twiml = f"""
 <Response>
   <Say>{opening_line}</Say>
-  <Gather input="speech" action="{APP_BASE_URL}/twilio-voice" method="POST" timeout="5" speechTimeout="auto">
+  <Gather input="speech" action="{APP_BASE_URL}/twilio-voice" method="POST" timeout="5" speechTimeout="{GATHER_SPEECH_TIMEOUT}" partialResultCallback="{APP_BASE_URL}/twilio-partial" partialResultCallbackMethod="POST">
     <Say>I'm listening...</Say>
   </Gather>
 </Response>"""
     return Response(content=twiml.strip(), media_type="application/xml")
+
+
+@app.post("/twilio-partial")
+async def twilio_partial(request: Request) -> Response:
+    form = await request.form()
+    sid = (form.get("CallSid") or "").strip()
+    transcript = (
+        form.get("UnstableSpeechResult")
+        or form.get("SpeechResult")
+        or ""
+    ).strip()
+
+    if not sid or not transcript:
+        return PlainTextResponse("ok", status_code=200)
+
+    _mark_user_activity(sid)
+    await _enqueue(
+        sid,
+        {
+            "event": "partial",
+            "sid": sid,
+            "transcript": transcript,
+        },
+    )
+
+    return PlainTextResponse("ok", status_code=200)
 
 # ----------------------------------------------------------------------------
 # Twilio status callback (form-encoded)
@@ -467,6 +521,7 @@ _call_configs: Dict[str, Dict[str, Optional[str]]] = {}
 _event_queues: Dict[str, asyncio.Queue[str]] = {}
 _audio_streams: Dict[str, asyncio.Queue[Optional[bytes]]] = {}
 _audio_stream_tasks: Dict[str, asyncio.Task] = {}
+_user_activity_events: Dict[str, asyncio.Event] = {}
 
 
 async def _stop_audio_stream(sid: str) -> None:
@@ -479,6 +534,18 @@ async def _stop_audio_stream(sid: str) -> None:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+
+def _mark_user_activity(sid: str) -> None:
+    event = _user_activity_events.get(sid)
+    if event is not None:
+        event.set()
+
+
+def _prepare_for_next_user_activity(sid: str) -> asyncio.Event:
+    event = asyncio.Event()
+    _user_activity_events[sid] = event
+    return event
 
 
 
@@ -494,24 +561,70 @@ async def _stream_reply_audio(
 ) -> None:
     append = False
     parts: list[str] = []
+    first_chunk_event = asyncio.Event()
+    write_lock = asyncio.Lock()
+
+    call_state = _call_configs.setdefault(sid, {})
+    turn = int(call_state.get("turn", 0)) + 1
+    call_state["turn"] = turn
+    is_first_turn = turn == 1
+
+    async def _emit_backchannel() -> None:
+        nonlocal append
+        try:
+            await asyncio.sleep(BACKCHANNEL_DELAY_MS / 1000.0)
+            if first_chunk_event.is_set():
+                return
+
+            await _enqueue(
+                sid,
+                {
+                    "event": "backchannel",
+                    "sid": sid,
+                    "detail": BACKCHANNEL_TEXT,
+                },
+            )
+
+            async with write_lock:
+                wrote_audio = False
+                async for audio_chunk in stream_text_to_speech(
+                    BACKCHANNEL_TEXT,
+                    output_path=output_path,
+                    append=append,
+                ):
+                    if first_chunk_event.is_set():
+                        break
+                    wrote_audio = True
+                    await queue.put(audio_chunk)
+                if wrote_audio:
+                    append = True
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Backchannel generation failed for %s", sid, exc_info=True)
+
+    backchannel_task = asyncio.create_task(_emit_backchannel())
 
     try:
-        async for chunk in stream_coldcall_reply(messages):
+        async for chunk in stream_coldcall_reply(messages, is_first_turn=is_first_turn):
             text = chunk.strip()
             if not text:
                 continue
 
             parts.append(text)
-            wrote_audio = False
-            async for audio_chunk in stream_text_to_speech(
-                text,
-                output_path=output_path,
-                append=append,
-            ):
-                wrote_audio = True
-                await queue.put(audio_chunk)
-            if wrote_audio:
-                append = True
+            first_chunk_event.set()
+
+            async with write_lock:
+                wrote_audio = False
+                async for audio_chunk in stream_text_to_speech(
+                    text,
+                    output_path=output_path,
+                    append=append,
+                ):
+                    wrote_audio = True
+                    await queue.put(audio_chunk)
+                if wrote_audio:
+                    append = True
 
         final_text = " ".join(parts).strip()
         if final_text:
@@ -534,6 +647,74 @@ async def _stream_reply_audio(
             except Exception:
                 pass
 
+        # Prepare to detect the next user utterance (for continuation or cancellation).
+        next_activity_event = _prepare_for_next_user_activity(sid)
+
+        async def _stream_continuation() -> None:
+            nonlocal append
+            continuation_messages = list(messages) + [
+                {"role": "assistant", "content": final_text}
+            ]
+            continuation_parts: list[str] = []
+
+            async for chunk in stream_coldcall_reply(
+                continuation_messages, is_first_turn=False
+            ):
+                if next_activity_event.is_set():
+                    return
+
+                text = chunk.strip()
+                if not text:
+                    continue
+
+                continuation_parts.append(text)
+
+                async with write_lock:
+                    wrote_audio = False
+                    async for audio_chunk in stream_text_to_speech(
+                        text,
+                        output_path=output_path,
+                        append=append,
+                    ):
+                        if next_activity_event.is_set():
+                            break
+                        wrote_audio = True
+                        await queue.put(audio_chunk)
+                    if wrote_audio:
+                        append = True
+
+            follow_up = " ".join(continuation_parts).strip()
+            if follow_up and not next_activity_event.is_set():
+                await _enqueue(
+                    sid,
+                    {
+                        "event": "continuation",
+                        "sid": sid,
+                        "bot_reply": follow_up,
+                    },
+                )
+
+                try:
+                    await log_conversation(
+                        ConversationLog(
+                            user_input="[silence continuation]", bot_reply=follow_up
+                        )
+                    )
+                except Exception:
+                    pass
+
+        if (
+            is_first_turn
+            and final_text
+            and CONTINUATION_SILENCE_SECONDS > 0
+        ):
+            try:
+                await asyncio.wait_for(
+                    next_activity_event.wait(), timeout=CONTINUATION_SILENCE_SECONDS
+                )
+            except asyncio.TimeoutError:
+                await _stream_continuation()
+
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -546,6 +727,11 @@ async def _stream_reply_audio(
             },
         )
     finally:
+        if not backchannel_task.done():
+            backchannel_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await backchannel_task
+
         await queue.put(None)
         if _audio_streams.get(sid) is queue:
             _audio_streams.pop(sid, None)
@@ -566,6 +752,7 @@ async def _close_stream(sid: str) -> None:
         await q.put("[DONE]")
     _event_queues.pop(sid, None)
     _call_configs.pop(sid, None)
+    _user_activity_events.pop(sid, None)
     await _stop_audio_stream(sid)
 
 @app.get("/sse")
