@@ -1,0 +1,33 @@
+# fly.toml — TriFiVend / ai-callbot
+app = "ai-callbot"
+primary_region = "sjc"
+
+[env]
+  PORT = "8080"
+  ENVIRONMENT = "production"
+
+# Modern Machines-style http_service block
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_start_machines = true
+  auto_stop_machines = "off"
+  min_machines_running = 1
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 20
+    hard_limit = 40
+
+  [[http_service.checks]]
+    interval = "10s"
+    timeout  = "2s"
+    grace_period = "10s"
+    method   = "GET"
+    path     = "/health"
+    protocol = "http"
+
+# Optional: add static public URL for reference in logs
+[metadata]
+  fly_platform = "machines"

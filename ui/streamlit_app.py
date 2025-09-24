@@ -41,8 +41,7 @@ except ModuleNotFoundError:
 
 
 # ---- Config -----------------------------------------------------------------
-BACKEND_URL = st.secrets.get("BACKEND_URL", os.getenv("BACKEND_URL", "http://localhost:8080")).rstrip("/")
-
+BACKEND_URL = os.getenv("BACKEND_URL") or st.secrets.get("BACKEND_URL", "http://localhost:8080")
 st.set_page_config(page_title="Trifivend Streamlit Interface", layout="wide")
 st.title("Trifivend Streamlit Interface")
 

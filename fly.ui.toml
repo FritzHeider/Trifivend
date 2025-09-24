@@ -1,4 +1,4 @@
-app = "trifivend-ui"                 # <- your actual UI app name
+app = "trifivend-ui"
 primary_region = "sjc"
 
 [build]
@@ -6,16 +6,14 @@ primary_region = "sjc"
   [build.args]
     REQS = "/tmp/requirements.ui.txt"
 
-[env]
-  # run Streamlit via START_CMD so there’s no ambiguity
-  START_CMD = "streamlit run ui/streamlit_app.py --server.address 0.0.0.0 --server.port 8501"
-  STREAMLIT_SERVER_HEADLESS = "true"
-  STREAMLIT_SERVER_ADDRESS  = "0.0.0.0"
-  STREAMLIT_SERVER_PORT     = "8501"
+# kill START_CMD. Let Fly run the process.
+[processes]
+  ui = "streamlit run ui/streamlit_app.py --server.address 0.0.0.0 --server.port 8501"
 
 [[services]]
   protocol = "tcp"
   internal_port = 8501
+  processes = ["ui"]
 
   [[services.ports]]
     handlers = ["http"]

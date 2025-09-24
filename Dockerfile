@@ -31,5 +31,7 @@ ENV STREAMLIT_SERVER_HEADLESS=true \
     STREAMLIT_SERVER_ADDRESS=0.0.0.0 \
     STREAMLIT_SERVER_PORT=8501
 
-# 👇 Run whatever START_CMD is set to at runtime
-CMD ["bash","-lc","${START_CMD}"]
+# ...
+ENV PYTHONPATH=/app
+# Don’t start the app here; Fly [processes] handles it
+CMD ["bash","-lc","python -c 'print(\"fly will run the process from fly.toml\")'"]
