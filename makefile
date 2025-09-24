@@ -1,59 +1,79 @@
-# ---- Config ----
-APP_NAME := ai-vendbot
-FLY_URL  := https://$(APP_NAME).fly.dev
-LOCAL_PORT := 8080
+# Makefile — two-app Fly.io workflow
+APP_NAME_API ?= ai-vendbot
+APP_NAME_UI  ?= trifivend-ui
+PRIMARY_REGION ?= sjc
 
-# ---- Python env (local) ----
-.PHONY: venv
-venv:
-	python3 -m venv .venv && . .venv/bin/activate && pip install -U pip
+TOML_API ?= fly.api.toml
+TOML_UI  ?= fly.ui.toml
 
-.PHONY: deps-backend
-deps-backend: venv
-	. .venv/bin/activate && pip install -r requirements.backend.txt
+.PHONY: help
+help:
+	@echo "Targets:"
+	@echo "  deploy-api       Deploy the FastAPI app ($(APP_NAME_API))"
+	@echo "  deploy-ui        Deploy the Streamlit UI ($(APP_NAME_UI))"
+	@echo "  deploy-both      Deploy API then UI"
+	@echo "  secrets-api      Push API secrets from .env"
+	@echo "  secrets-ui       Push UI secrets from .env"
+	@echo "  logs-api         Tail API logs"
+	@echo "  logs-ui          Tail UI logs"
+	@echo "  status-api       Fly status for API"
+	@echo "  status-ui        Fly status for UI"
 
-.PHONY: deps-ui
-deps-ui: venv
-	. .venv/bin/activate && pip install -r requirements.ui.txt
-
-# ---- Run locally ----
-.PHONY: run-backend
-run-backend: deps-backend
-	. .venv/bin/activate && uvicorn main:app --host 0.0.0.0 --port $(LOCAL_PORT)
-
-.PHONY: run-ui
-run-ui: deps-ui
-	cd ui && . ../.venv/bin/activate && streamlit run streamlit_app.py
-
-# ---- Fly.io ----
-.PHONY: deploy
-deploy:
-	fly deploy --remote-only
-
-.PHONY: secrets
-secrets:
-	@test "$(TWILIO_ACCOUNT_SID)" != "" || (echo "TWILIO_ACCOUNT_SID missing"; exit 1)
-	@test "$(TWILIO_AUTH_TOKEN)"  != "" || (echo "TWILIO_AUTH_TOKEN missing"; exit 1)
-	@test "$(TWILIO_NUMBER)"      != "" || (echo "TWILIO_NUMBER missing"; exit 1)
+# ===== Secrets =====
+.PHONY: secrets-api
+secrets-api:
+	@test -f .env || (echo "Missing .env — copy .env.example and fill"; exit 1)
+	set -a; . ./.env; set +a; \
 	fly secrets set \
-	  TWILIO_ACCOUNT_SID=$(TWILIO_ACCOUNT_SID) \
-	  TWILIO_AUTH_TOKEN=$(TWILIO_AUTH_TOKEN) \
-	  TWILIO_NUMBER=$(TWILIO_NUMBER) \
-	  APP_BASE_URL=$(FLY_URL)
+		OPENAI_API_KEY="$$OPENAI_API_KEY" \
+		SUPABASE_URL="$$SUPABASE_URL" \
+		SUPABASE_SERVICE_KEY="$$SUPABASE_SERVICE_KEY" \
+		ELEVEN_API_KEY="$$ELEVEN_API_KEY" \
+		TWILIO_ACCOUNT_SID="$$TWILIO_ACCOUNT_SID" \
+		TWILIO_AUTH_TOKEN="$$TWILIO_AUTH_TOKEN" \
+		TWILIO_NUMBER="$$TWILIO_NUMBER" \
+		VOICE_WEBHOOK_URL="$$VOICE_WEBHOOK_URL" \
+		LEAD_PHONE="$$LEAD_PHONE" \
+		-a $(APP_NAME_API)
 
-.PHONY: logs
-logs:
-	fly logs
+.PHONY: secrets-ui
+secrets-ui:
+	@test -f .env || (echo "Missing .env — copy .env.example and fill"; exit 1)
+	set -a; . ./.env; set +a; \
+	fly secrets set \
+		BACKEND_URL="$${UI_BACKEND_URL:-http://$(APP_NAME_API).internal:8080}" \
+		SUPABASE_URL="$$SUPABASE_URL" \
+		SUPABASE_ANON_KEY="$$SUPABASE_ANON_KEY" \
+		-a $(APP_NAME_UI)
 
-# ---- Smoke tests ----
-.PHONY: health
-health:
-	curl -sS "$(FLY_URL)/health" | python -m json.tool
+# ===== Deploys =====
+.PHONY: deploy-api
+deploy-api:
+	@fly apps list | grep -q "^$(APP_NAME_API)\b" || fly apps create "$(APP_NAME_API)" --region "$(PRIMARY_REGION)"
+	fly deploy -c $(TOML_API) -a $(APP_NAME_API)
 
-.PHONY: call
-call:
-	@test "$(TO)" != "" || (echo 'Usage: make call TO=+1XXXXXXXXXX NAME="Riley"'; exit 1)
-	curl -sS -X POST "$(FLY_URL)/call" \
-	  -H 'content-type: application/json' \
-	  -d '{"to":"$(TO)","lead_name":"$(NAME)","property_type":"apartment","location_area":"San Francisco","callback_offer":"schedule a free design session"}' \
-	  | python -m json.tool
+.PHONY: deploy-ui
+deploy-ui:
+	@fly apps list | grep -q "^$(APP_NAME_UI)\b" || fly apps create "$(APP_NAME_UI)" --region "$(PRIMARY_REGION)"
+	fly deploy -c $(TOML_UI) -a $(APP_NAME_UI)
+
+.PHONY: deploy-both
+deploy-both: deploy-api deploy-ui
+	@echo "Deployed: API=https://$(APP_NAME_API).fly.dev  UI=https://$(APP_NAME_UI).fly.dev"
+
+# ===== Ops =====
+.PHONY: logs-api
+logs-api:
+	fly logs -a $(APP_NAME_API)
+
+.PHONY: logs-ui
+logs-ui:
+	fly logs -a $(APP_NAME_UI)
+
+.PHONY: status-api
+status-api:
+	fly status -a $(APP_NAME_API)
+
+.PHONY: status-ui
+status-ui:
+	fly status -a $(APP_NAME_UI)

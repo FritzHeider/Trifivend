@@ -1,20 +1,22 @@
-app = "ai-vendbot"     # 👈 this must match your Fly app name
-primary_region = "sjc"
+# fly.toml app configuration file generated for trifivend on 2025-09-24T07:45:24-04:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'trifivend'
+primary_region = 'sjc'
 
 [build]
-  dockerfile = "Dockerfile"
 
 [http_service]
   internal_port = 8080
   force_https = true
+  auto_stop_machines = 'stop'
   auto_start_machines = true
-  auto_stop_machines = "off"
-  min_machines_running = 1
+  min_machines_running = 0
+  processes = ['app']
 
-[checks.http]
-  port = 8080
-  type = "http"
-  interval = "10s"
-  timeout = "2s"
-  method = "GET"
-  path = "/health"
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1

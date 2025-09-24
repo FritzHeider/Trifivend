@@ -1,4 +1,4 @@
-app = "trifivend-ui"
+app = "trifivend-ui"          # <-- your UI app name
 primary_region = "sjc"
 
 [build]
