@@ -227,8 +227,12 @@ class HealthOut(BaseModel):
 def health() -> HealthOut:
     return HealthOut(
         ok=True,
-        twilio_configured=bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_NUMBER),
-        app_base_url=APP_BASE_URL,
+        twilio_configured=bool(
+            os.getenv("TWILIO_ACCOUNT_SID") 
+            and os.getenv("TWILIO_AUTH_TOKEN") 
+            and os.getenv("TWILIO_NUMBER")
+        ),
+        app_base_url=os.getenv("APP_BASE_URL", ""),
     )
 
 # ----------------------------------------------------------------------------

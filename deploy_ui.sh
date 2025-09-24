@@ -16,7 +16,7 @@ if ! fly apps list | grep -q "^$APP_NAME\b"; then
 fi
 
 # Prefer private networking to avoid CORS:
-BACKEND_URL="${UI_BACKEND_URL:-http://ai-vendbot.internal:8080}"
+BACKEND_URL="${UI_BACKEND_URL:-http://ai-callbot.internal:8080}"
 
 echo "🔐 Setting UI secrets..."
 fly secrets set \

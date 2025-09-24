@@ -1,32 +1,35 @@
-app = "trifivend-ui"
-primary_region = "sjc"
+# syntax=docker/dockerfile:1
+FROM python:3.13-slim
 
-[build]
-  dockerfile = "Dockerfile"
-  [build.args]
-    REQS = "/tmp/requirements.ui.txt"
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
-[env]
-  STREAMLIT_SERVER_HEADLESS = "true"
-  STREAMLIT_SERVER_ADDRESS  = "0.0.0.0"
-  STREAMLIT_SERVER_PORT     = "8501"
+WORKDIR /app
 
-[processes]
-  ui = "streamlit run ui/streamlit_app.py --server.address 0.0.0.0 --server.port 8501"
+RUN apt-get update -y && apt-get install -y --no-install-recommends \
+    build-essential curl ca-certificates git \
+  && rm -rf /var/lib/apt/lists/*
 
-[[services]]
-  protocol = "tcp"
-  internal_port = 8501
-  processes = ["ui"]
+# Copy ONLY the files that exist
+COPY requirements.backend.txt /tmp/requirements.backend.txt
+COPY requirements.ui.txt      /tmp/requirements.ui.txt
 
-  [[services.ports]]
-    handlers = ["http"]
-    port = 80
-  [[services.ports]]
-    handlers = ["tls","http"]
-    port = 443
+# You MUST pass REQS via build args (fly.toml does this)
+ARG REQS
+RUN test -n "$REQS" || (echo "Set build arg REQS to one of /tmp/requirements.backend.txt or /tmp/requirements.ui.txt" && exit 1)
+RUN python -m pip install --upgrade pip && python -m pip install -r "$REQS"
 
-  [[services.tcp_checks]]
-    interval = "15s"
-    timeout  = "2s"
-    grace_period = "30s"
+# App source
+COPY . /app
+
+# ... previous Dockerfile content ...
+ENV PYTHONPATH=/app
+
+# Streamlit envs are harmless for API images
+ENV STREAMLIT_SERVER_HEADLESS=true \
+    STREAMLIT_SERVER_ADDRESS=0.0.0.0 \
+    STREAMLIT_SERVER_PORT=8501
+
+# 👇 Run whatever START_CMD is set to at runtime
+CMD ["bash","-lc","${START_CMD}"]
