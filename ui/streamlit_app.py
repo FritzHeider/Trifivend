@@ -41,10 +41,18 @@ except ModuleNotFoundError:
 
 
 # ---- Config -----------------------------------------------------------------
-BACKEND_URL = os.getenv("BACKEND_URL") or st.secrets.get("BACKEND_URL", "http://localhost:8080")
+def _backend_url() -> str:
+    env = os.getenv("BACKEND_URL")
+    if env:
+        return env.rstrip("/")
+    try:
+        return st.secrets.get("BACKEND_URL", "http://localhost:8080").rstrip("/")
+    except FileNotFoundError:
+        return "http://localhost:8080"
+
+BACKEND_URL = _backend_url()
 st.set_page_config(page_title="Trifivend Streamlit Interface", layout="wide")
 st.title("Trifivend Streamlit Interface")
-
 # ---- Diagnostics ------------------------------------------------------------
 with st.expander("🔎 Diagnostics", expanded=False):
     st.write("**BACKEND_URL**:", BACKEND_URL)

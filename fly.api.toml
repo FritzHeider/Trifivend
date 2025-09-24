@@ -6,13 +6,13 @@ primary_region = "sjc"
   [build.args]
     REQS = "/tmp/requirements.backend.txt"
 
-[env]
-  PORT = "8080"
-  START_CMD = "uvicorn main:app --host 0.0.0.0 --port 8080"
+[processes]
+  api = "uvicorn main:app --host 0.0.0.0 --port 8080"
 
 [[services]]
   protocol = "tcp"
   internal_port = 8080
+  processes = ["api"]
 
   [[services.tcp_checks]]
     interval = "15s"

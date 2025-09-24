@@ -6,9 +6,9 @@ primary_region = "sjc"
   [build.args]
     REQS = "/tmp/requirements.ui.txt"
 
-# kill START_CMD. Let Fly run the process.
+# Ensure there's NO START_CMD here. Remove any old [env].START_CMD.
 [processes]
-  ui = "streamlit run ui/streamlit_app.py --server.address 0.0.0.0 --server.port 8501"
+  ui = "python -m streamlit run ui/streamlit_app.py --server.address 0.0.0.0 --server.port 8501"
 
 [[services]]
   protocol = "tcp"
