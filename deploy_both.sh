@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export APP_NAME_API="${APP_NAME_API:-ai-vendbot}"
+export APP_NAME_API="${APP_NAME_API:-ai-callbot}"
 export APP_NAME_UI="${APP_NAME_UI:-trifivend-ui}"
 export TOML_API="${TOML_API:-fly.api.toml}"
 export TOML_UI="${TOML_UI:-fly.ui.toml}"

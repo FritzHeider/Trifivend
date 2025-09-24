@@ -12,7 +12,7 @@ set -a; source .env; set +a
 
 if ! fly apps list | grep -q "^$APP_NAME\b"; then
   echo "🛠 Creating Fly app: $APP_NAME"
-  fly apps create "$APP_NAME" --region "$PRIMARY_REGION"
+  fly apps create "$APP_NAME" 
 fi
 
 # Prefer private networking to avoid CORS:

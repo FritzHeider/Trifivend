@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="${APP_NAME_API:-ai-vendbot}"
+APP_NAME="${APP_NAME_API:-ai-callbot}"
 PRIMARY_REGION="${PRIMARY_REGION:-sjc}"
 TOML="${TOML_API:-fly.api.toml}"
 
@@ -12,7 +12,7 @@ set -a; source .env; set +a
 
 if ! fly apps list | grep -q "^$APP_NAME\b"; then
   echo "🛠 Creating Fly app: $APP_NAME"
-  fly apps create "$APP_NAME" --region "$PRIMARY_REGION"
+  fly apps create "$APP_NAME" 
 fi
 
 echo "🔐 Setting API secrets..."
