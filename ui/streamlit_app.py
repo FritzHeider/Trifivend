@@ -5,7 +5,7 @@
 #     ├─ app/backend/supabase_logger.py   (LeadScript, log_script, get_script)
 #     └─ ui/streamlit_app.py              (this file)
 # Env / Secrets:
-#   - BACKEND_URL (e.g., https://ai-vendbot.fly.dev or http://ai-vendbot.internal:8080)
+#   - BACKEND_URL (e.g., https://ai-callbot.fly.dev or http://ai-callbot.internal:8080)
 #   - SUPABASE_URL
 #   - SUPABASE_ANON_KEY
 # Run:
