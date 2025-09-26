@@ -3,17 +3,28 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from collections.abc import AsyncGenerator, Sequence
 from typing import List, MutableSequence
 
-from openai import AsyncOpenAI
+from app.openai_compat import (
+    create_async_openai_client,
+    is_openai_available,
+    missing_openai_error,
+)
 
 # -----------------------------------------------------------------------------
 # Config
 # -----------------------------------------------------------------------------
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-async_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+logger = logging.getLogger(__name__)
+async_client = create_async_openai_client(api_key=os.getenv("OPENAI_API_KEY"))
+if not is_openai_available():  # pragma: no cover - exercised when dependency missing
+    logger.warning(
+        "OpenAI SDK unavailable; streaming replies will raise until installed: %s",
+        missing_openai_error(),
+    )
 
 # Lower thresholds for faster first audio
 _SENTENCE_DELIMITERS = (".", "?", "!", "\n")

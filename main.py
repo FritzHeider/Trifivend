@@ -36,17 +36,17 @@ from fastapi.responses import (
 from pydantic import BaseModel, Field, validator
 from sse_starlette.sse import EventSourceResponse
 from twilio.rest import Client as TwilioClient
-from openai import AsyncOpenAI
 
 # ---- your modules ----------------------------------------------------------
 from agent.listen import transcribe_audio
 from app.voicebot import coldcall_lead, stream_coldcall_reply
 from agent.speak import speak_text, stream_text_to_speech
 from app.backend.supabase_logger import ConversationLog, Lead, log_conversation, log_lead
-from types import SimpleNamespace
-
-# minimal OpenAI client placeholder for tests
-openai_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=None)))
+from app.openai_compat import (
+    create_async_openai_client,
+    is_openai_available,
+    missing_openai_error,
+)
 
 # ----------------------------------------------------------------------------
 # Env / Config
@@ -75,9 +75,14 @@ SCRIPTS = {
     }
 }
 
-openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
-
 logger = logging.getLogger(__name__)
+
+openai_client = create_async_openai_client(api_key=os.getenv("OPENAI_API_KEY", ""))
+if not is_openai_available():
+    logger.warning(
+        "OpenAI SDK unavailable; AI responses will raise until the dependency is installed: %s",
+        missing_openai_error(),
+    )
 
 BACKCHANNEL_DELAY_MS = float(os.getenv("BACKCHANNEL_DELAY_MS", "300"))
 BACKCHANNEL_TEXT = os.getenv("BACKCHANNEL_TEXT", "One sec…")
