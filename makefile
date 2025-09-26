@@ -1,5 +1,5 @@
 # Makefile — two-app Fly.io workflow
-APP_NAME_API ?= ai-vendbot
+APP_NAME_API ?= ai-callbot
 APP_NAME_UI  ?= trifivend-ui
 PRIMARY_REGION ?= sjc
 
