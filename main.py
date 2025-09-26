@@ -18,11 +18,9 @@ from fastapi import (
     FastAPI,
     File,
     Form,
-    Header,
     HTTPException,
     Request,
     UploadFile,
-    status,
 )
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,40 +31,47 @@ from fastapi.responses import (
     Response,
     StreamingResponse,
 )
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field
+from pydantic import AliasChoices, ConfigDict, field_validator  # Pydantic v2
 from sse_starlette.sse import EventSourceResponse
 from twilio.rest import Client as TwilioClient
 
-# ---- your modules ----------------------------------------------------------
-from agent.listen import transcribe_audio
-from app.voicebot import coldcall_lead, stream_coldcall_reply
-from agent.speak import speak_text, stream_text_to_speech
-from app.backend.supabase_logger import ConversationLog, Lead, log_conversation, log_lead
-from app.openai_compat import (
-    create_async_openai_client,
-    is_openai_available,
-    missing_openai_error,
-)
+# ──────────────────────────────────────────────────────────────────────────────
+# App bootstrap & configuration
+# ──────────────────────────────────────────────────────────────────────────────
 
-# ----------------------------------------------------------------------------
-# Env / Config
-# ----------------------------------------------------------------------------
+# Load environment variables early
 load_dotenv()
 
-ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+# Minimal logging configuration
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("trifivend.api")
+
+# Environment flags
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
-# Public base of THIS backend (Twilio needs absolute URLs)
+# Public base of THIS backend (Twilio requires absolute URLs)
 APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8080").rstrip("/")
 
-# Twilio
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
-TWILIO_NUMBER = os.getenv("TWILIO_NUMBER", "").strip()
+# Twilio config
+TWILIO_ACCOUNT_SID = (os.getenv("TWILIO_ACCOUNT_SID") or "").strip()
+TWILIO_AUTH_TOKEN = (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
+TWILIO_NUMBER = (os.getenv("TWILLO_NUMBER") or os.getenv("TWILIO_NUMBER") or "").strip()
 
-# Simple script registry mapping IDs to opening lines. Additional scripts can
-# be added here or supplied by clients via ``script_id``.
-SCRIPTS = {
+# Backchannel/latency tuning
+BACKCHANNEL_DELAY_MS = float(os.getenv("BACKCHANNEL_DELAY_MS", "300"))
+BACKCHANNEL_TEXT = os.getenv("BACKCHANNEL_TEXT", "One sec…")
+CONTINUATION_SILENCE_SECONDS = float(os.getenv("CONTINUATION_SILENCE_SECONDS", "2.0"))
+SYSTEM_PROMPT_TOKEN_LIMIT = int(os.getenv("SYSTEM_PROMPT_TOKEN_LIMIT", "300"))
+# Twilio <Gather> speech timeout; Twilio accepts numbers or "auto". Keep as string.
+GATHER_SPEECH_TIMEOUT = os.getenv("GATHER_SPEECH_TIMEOUT", "0.3")
+
+# Simple script registry mapping IDs to opening lines (extend as needed)
+SCRIPTS: Dict[str, Dict[str, str]] = {
     "default": {
         "opening_line": (
             "Hi, this is Ava from Trifivend. Are you the right person to speak with "
@@ -75,34 +80,80 @@ SCRIPTS = {
     }
 }
 
-logger = logging.getLogger(__name__)
+# Import OpenAI helper (kept optional-safe)
+try:
+    from app.openai_compat import (
+        create_async_openai_client,
+        is_openai_available,
+        missing_openai_error,
+    )
+except Exception as e:  # pragma: no cover
+    logger.warning("OpenAI compatibility layer not importable: %s", e)
+    create_async_openai_client = lambda **_: None  # type: ignore
+    is_openai_available = lambda: False  # type: ignore
+    missing_openai_error = lambda: str(e)  # type: ignore
 
 openai_client = create_async_openai_client(api_key=os.getenv("OPENAI_API_KEY", ""))
 if not is_openai_available():
     logger.warning(
-        "OpenAI SDK unavailable; AI responses will raise until the dependency is installed: %s",
+        "OpenAI SDK unavailable; AI responses will error if invoked: %s",
         missing_openai_error(),
     )
 
-BACKCHANNEL_DELAY_MS = float(os.getenv("BACKCHANNEL_DELAY_MS", "300"))
-BACKCHANNEL_TEXT = os.getenv("BACKCHANNEL_TEXT", "One sec…")
-CONTINUATION_SILENCE_SECONDS = float(os.getenv("CONTINUATION_SILENCE_SECONDS", "2.0"))
-SYSTEM_PROMPT_TOKEN_LIMIT = int(os.getenv("SYSTEM_PROMPT_TOKEN_LIMIT", "300"))
-GATHER_SPEECH_TIMEOUT = os.getenv("GATHER_SPEECH_TIMEOUT", "0.3")
+# ──────────────────────────────────────────────────────────────────────────────
+# External/local modules (lazy where prudent to avoid import-time crashes)
+# ──────────────────────────────────────────────────────────────────────────────
+# If any of these fail to import at startup, we degrade gracefully and raise
+# a clear error at first use via _require_local_module().
+try:
+    from agent.listen import transcribe_audio
+    from agent.speak import speak_text, stream_text_to_speech
+    from app.voicebot import coldcall_lead, stream_coldcall_reply
+    from app.backend.supabase_logger import (
+        ConversationLog,
+        Lead,
+        Call,
+        CallEvent,
+        log_conversation,
+        log_lead,
+        log_call,
+        log_call_event,
+    )
+except Exception as e:
+    logger.warning("Deferred import of local modules due to: %s", e)
+    transcribe_audio = None  # type: ignore
+    speak_text = None  # type: ignore
+    stream_text_to_speech = None  # type: ignore
+    coldcall_lead = None  # type: ignore
+    stream_coldcall_reply = None  # type: ignore
+    ConversationLog = None  # type: ignore
+    Lead = None  # type: ignore
+    Call = None  # type: ignore
+    CallEvent = None  # type: ignore
+    log_conversation = None  # type: ignore
+    log_lead = None  # type: ignore
+    log_call = None  # type: ignore
+    log_call_event = None  # type: ignore
 
-
+# ──────────────────────────────────────────────────────────────────────────────
+# Utilities
+# ──────────────────────────────────────────────────────────────────────────────
 def _trim_system_prompt(prompt: str) -> str:
-    """Clamp custom system prompts to roughly ``SYSTEM_PROMPT_TOKEN_LIMIT`` tokens."""
-
+    """Clamp custom system prompts to ~SYSTEM_PROMPT_TOKEN_LIMIT tokens."""
     if not prompt:
         return ""
-
     tokens = prompt.split()
     if len(tokens) <= SYSTEM_PROMPT_TOKEN_LIMIT:
         return prompt
+    return " ".join(tokens[:SYSTEM_PROMPT_TOKEN_LIMIT])
 
-    trimmed = " ".join(tokens[:SYSTEM_PROMPT_TOKEN_LIMIT])
-    return trimmed
+
+def _require_local_module(name: str, obj: Any):
+    if obj is None:
+        raise RuntimeError(
+            f"Module '{name}' is not available (deferred import failed). "
+            "Check your image contents and requirements."
+        )
 
 
 def _schedule_background_coroutine(
@@ -112,6 +163,7 @@ def _schedule_background_coroutine(
     background_tasks: BackgroundTasks | None = None,
     **kwargs: Any,
 ) -> None:
+    """Run a coroutine in the background without binding to the request cycle."""
     async def runner() -> None:
         try:
             await coro_func(*args, **kwargs)
@@ -122,12 +174,10 @@ def _schedule_background_coroutine(
         asyncio.create_task(runner())
     except RuntimeError:
         if background_tasks is not None:
-            background_tasks.add_task(runner)
+            background_tasks.add_task(runner)  # type: ignore[arg-type]
         else:
-            logger.error(
-                "Unable to schedule background coroutine '%s': no running event loop",
-                description,
-            )
+            logger.error("Unable to schedule '%s': no running event loop", description)
+
 
 def twilio_client() -> TwilioClient:
     if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_NUMBER):
@@ -137,9 +187,10 @@ def twilio_client() -> TwilioClient:
         )
     return TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
-# ----------------------------------------------------------------------------
-# App + CORS
-# ----------------------------------------------------------------------------
+
+# ──────────────────────────────────────────────────────────────────────────────
+# FastAPI app & CORS
+# ──────────────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Trifivend Backend", version="1.0.0")
 
 app.add_middleware(
@@ -150,13 +201,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ----------------------------------------------------------------------------
-# Models / Validation
-# ----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# Models (Pydantic v2)
+# ──────────────────────────────────────────────────────────────────────────────
 E164_RE = re.compile(r"^\+\d{8,15}$")
+
+
 class CallRequest(BaseModel):
-    # Accept both "to" (preferred) and legacy "phone"
-    to: str = Field(..., alias="phone", description="E.164, e.g. +14155550123")
+    """
+    Body accepted by POST /call.
+    Accepts both "to" (preferred) and legacy "phone".
+    """
+    to: str = Field(
+        ...,
+        validation_alias=AliasChoices("to", "phone"),
+        serialization_alias="to",
+        description="E.164, e.g. +14155550123",
+    )
     lead_name: str
     property_type: str
     location_area: str
@@ -164,110 +225,75 @@ class CallRequest(BaseModel):
     script_id: Optional[str] = None
     system_prompt: Optional[str] = None
 
+    model_config = ConfigDict(populate_by_name=True)
 
-    class Config:
-        # This line makes Pydantic accept either "to" OR "phone" in the body
-        allow_population_by_field_name = True
-        allow_population_by_alias = True   # <--- add this
-
-    @validator("to")
-    def _valid_e164(cls, v: str) -> str:
-        vv = v.strip()
-        if not E164_RE.match(vv):
-            raise ValueError("Invalid phone format. Use E.164 like +14155550123")
-        return vv
-
-    @validator("system_prompt")
-    def _limit_prompt(cls, v: Optional[str]) -> Optional[str]:
-        if not v:
-            return v
-        return _trim_system_prompt(v)
-# class CallRequest(BaseModel):
-#     # Accept both "to" (preferred) and legacy "phone"
-#     to: str = Field(..., alias="phone", description="E.164, e.g. +14155550123")
-#     lead_name: str
-#     property_type: str
-#     location_area: str
-#     callback_offer: str
-# 
-#     class Config:
-#         allow_population_by_field_name = True  # lets clients send "to"
-# 
-#     @validator("to")
-#     def _e164(cls, v: str) -> str:
-#         v = v.strip()
-#         if not E164_RE.match(v):
-#             raise ValueError("Invalid phone format. Use E.164 like +14155550123.")
-#         return v
-# class CallRequest(BaseModel):
-#     """
-#     Body accepted by POST /call.
-#     Accepts both "to" (preferred) and legacy "phone" as alias.
-#     """
-#     to: str = Field(..., alias="phone", description="E.164 number, e.g. +14155550123")
-#     lead_name: Optional[str] = None
-#     property_type: Optional[str] = None
-#     location_area: Optional[str] = None
-#     callback_offer: Optional[str] = None
-# 
-    class Config:
-        allow_population_by_field_name = True  # allow clients to send "to"
-
-    @validator("to")
+    @field_validator("to")
+    @classmethod
     def _valid_e164(cls, v: str) -> str:
         vv = (v or "").strip()
         if not E164_RE.match(vv):
             raise ValueError("Invalid phone format. Use E.164 like +14155550123")
         return vv
 
+    @field_validator("system_prompt")
+    @classmethod
+    def _limit_prompt(cls, v: Optional[str]) -> Optional[str]:
+        return _trim_system_prompt(v) if v else v
+
+
 class HealthOut(BaseModel):
     ok: bool
     twilio_configured: bool
     app_base_url: str
 
-# ----------------------------------------------------------------------------
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Health
-# ----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 @app.get("/health", response_model=HealthOut)
 def health() -> HealthOut:
     return HealthOut(
         ok=True,
-        twilio_configured=bool(
-            os.getenv("TWILIO_ACCOUNT_SID") 
-            and os.getenv("TWILIO_AUTH_TOKEN") 
-            and os.getenv("TWILIO_NUMBER")
-        ),
-        app_base_url=os.getenv("APP_BASE_URL", ""),
+        twilio_configured=bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_NUMBER),
+        app_base_url=APP_BASE_URL,
     )
 
-# ----------------------------------------------------------------------------
-# Transcribe -> reply -> speak -> log
-# ----------------------------------------------------------------------------
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Audio transcription → reply → speech → log
+# ──────────────────────────────────────────────────────────────────────────────
 @app.post("/transcribe")
 async def transcribe(
     file: UploadFile = File(...),
     background_tasks: BackgroundTasks = BackgroundTasks(),
 ):
-    if not file.filename.lower().endswith((".wav", ".mp3", ".m4a")):
+    _require_local_module("agent.listen.transcribe_audio", transcribe_audio)
+    _require_local_module("app.voicebot.coldcall_lead", coldcall_lead)
+    _require_local_module("agent.speak.speak_text", speak_text)
+    _require_local_module("app.backend.supabase_logger.log_conversation", log_conversation)
+
+    filename = (file.filename or "").lower()
+    if not filename.endswith((".wav", ".mp3", ".m4a")):
         raise HTTPException(status_code=400, detail="Unsupported audio format (.wav/.mp3/.m4a only)")
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1] or ".wav") as tmp:
         shutil.copyfileobj(file.file, tmp)
         tmp_path = tmp.name
 
     try:
         with open(tmp_path, "rb") as f:
-            user_input = await run_in_threadpool(transcribe_audio, f.read(), 44100)
+            # Run CPU-bound transcription off the event loop
+            user_input = await run_in_threadpool(transcribe_audio, f.read(), 44100)  # type: ignore[misc]
 
         bot_reply = await run_in_threadpool(
-            coldcall_lead, [{"role": "user", "content": user_input}]
+            coldcall_lead, [{"role": "user", "content": user_input}]  # type: ignore[misc]
         )
 
-        # schedule TTS + logging off the request thread
-        background_tasks.add_task(run_in_threadpool, speak_text, bot_reply)
+        # Offload TTS + logging
+        background_tasks.add_task(run_in_threadpool, speak_text, bot_reply)  # type: ignore[arg-type]
         _schedule_background_coroutine(
-            log_conversation,
-            ConversationLog(user_input=user_input, bot_reply=bot_reply),
+            log_conversation,  # type: ignore[misc]
+            ConversationLog(user_input=user_input, bot_reply=bot_reply),  # type: ignore[misc]
             description="conversation log",
             background_tasks=background_tasks,
         )
@@ -278,12 +304,12 @@ async def transcribe(
             "audio_url": "/audio/response.mp3",
         }
     except Exception as e:
+        logger.exception("Transcription pipeline failed")
         raise HTTPException(status_code=500, detail=f"Transcription failed: {e}")
     finally:
-        try:
+        with contextlib.suppress(Exception):
             os.remove(tmp_path)
-        except Exception:
-            pass
+
 
 @app.get("/audio/response.mp3")
 async def serve_audio():
@@ -308,16 +334,20 @@ async def stream_audio_response(sid: str):
 
     return StreamingResponse(iterator(), media_type="audio/mpeg")
 
-# ----------------------------------------------------------------------------
-# Outbound call (JSON body)  <<< THIS FIXES YOUR 422s
-# ----------------------------------------------------------------------------
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Outbound call API (JSON body)
+# ──────────────────────────────────────────────────────────────────────────────
 @app.post("/call")
 async def call_lead(
     body: CallRequest,
     background_tasks: BackgroundTasks,
     client: TwilioClient = Depends(twilio_client),
 ):
-    voice_url = f"{APP_BASE_URL}/twilio-voice"  # absolute URL for Twilio
+    _require_local_module("app.backend.supabase_logger.log_lead", log_lead)
+    _require_local_module("app.backend.supabase_logger.log_call", log_call)
+
+    voice_url = f"{APP_BASE_URL}/twilio-voice"
     status_cb = f"{APP_BASE_URL}/status"
 
     try:
@@ -332,9 +362,10 @@ async def call_lead(
             status_callback_event=["initiated", "ringing", "answered", "completed"],
         )
     except Exception as e:
+        logger.exception("Twilio call create failed")
         raise HTTPException(status_code=502, detail=f"Twilio error creating call: {e}")
 
-    # best-effort lead logging (non-blocking)
+    # Best-effort lead logging
     try:
         lead = Lead(
             name=body.lead_name or "",
@@ -347,13 +378,31 @@ async def call_lead(
         pass
     else:
         _schedule_background_coroutine(
-            log_lead,
+            log_lead,  # type: ignore[misc]
             lead,
             description="lead log",
             background_tasks=background_tasks,
         )
 
-    # persist call configuration and seed SSE stream with script/prompt details
+    # Log the call row immediately (non-blocking)
+    try:
+        _schedule_background_coroutine(
+            log_call,  # type: ignore[misc]
+            Call(  # type: ignore[misc]
+                lead_id=None,  # set if you bind leads ↔ calls
+                call_sid=call.sid,
+                from_number=TWILIO_NUMBER,
+                to_number=body.to,
+                status=getattr(call, "status", "queued"),
+            ),
+            description="call log",
+            background_tasks=background_tasks,
+        )
+    except Exception:
+        # never block the request
+        pass
+
+    # Persist call configuration and seed SSE
     _call_configs[call.sid] = {
         "script_id": body.script_id,
         "system_prompt": body.system_prompt,
@@ -372,17 +421,24 @@ async def call_lead(
 
     return {"call_sid": call.sid, "status": getattr(call, "status", "queued")}
 
-# ----------------------------------------------------------------------------
-# Twilio <Gather> voice webhook (absolute URLs)
-# ----------------------------------------------------------------------------
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Twilio voice webhook (<Gather> flow)
+# ──────────────────────────────────────────────────────────────────────────────
 @app.post("/twilio-voice")
 async def twilio_voice(
-    SpeechResult: str = Form(None), CallSid: str = Form("")
+    SpeechResult: str = Form(None),
+    CallSid: str = Form(""),
 ):
+    _require_local_module("app.voicebot.stream_coldcall_reply", stream_coldcall_reply)
+    _require_local_module("agent.speak.stream_text_to_speech", stream_text_to_speech)
+    _require_local_module("app.backend.supabase_logger.log_conversation", log_conversation)
+
     sid = (CallSid or "").strip()
     cfg = _call_configs.get(sid, {})
     script_id = cfg.get("script_id") or "default"
     system_prompt = cfg.get("system_prompt")
+
     opening_line = SCRIPTS.get(script_id, SCRIPTS["default"])["opening_line"]
 
     if SpeechResult:
@@ -392,7 +448,7 @@ async def twilio_voice(
         _mark_user_activity(sid)
         await _stop_audio_stream(sid)
 
-        messages = []
+        messages: list[dict[str, str]] = []
         if system_prompt:
             messages.append({"role": "system", "content": _trim_system_prompt(system_prompt)})
         if script_id and script_id != "default":
@@ -432,6 +488,7 @@ async def twilio_voice(
     <Say>I'm listening...</Say>
   </Gather>
 </Response>"""
+
     return Response(content=twiml.strip(), media_type="application/xml")
 
 
@@ -451,26 +508,25 @@ async def twilio_partial(request: Request) -> Response:
     _mark_user_activity(sid)
     await _enqueue(
         sid,
-        {
-            "event": "partial",
-            "sid": sid,
-            "transcript": transcript,
-        },
+        {"event": "partial", "sid": sid, "transcript": transcript},
     )
-
     return PlainTextResponse("ok", status_code=200)
 
-# ----------------------------------------------------------------------------
-# Twilio status callback (form-encoded)
-# ----------------------------------------------------------------------------
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Twilio status callback
+# ──────────────────────────────────────────────────────────────────────────────
 @app.post("/status")
 async def status_webhook(request: Request, background_tasks: BackgroundTasks):
+    _require_local_module("app.backend.supabase_logger.log_call_event", log_call_event)
+
     form = await request.form()
     sid = (form.get("CallSid") or "").strip()
     call_status = (form.get("CallStatus") or "").strip()
 
     if not sid:
         return PlainTextResponse("missing CallSid", status_code=200)
+
     cfg = _call_configs.get(sid, {})
     await _enqueue(
         sid,
@@ -483,49 +539,48 @@ async def status_webhook(request: Request, background_tasks: BackgroundTasks):
         },
     )
 
-    # non-blocking log
+    # Log the raw status event + payload (non-blocking)
     try:
-        log_entry = ConversationLog(
-            user_input=f"[Twilio status] {sid}",
-            bot_reply=call_status or "(none)",
-        )
+        payload = dict(form)
     except Exception:
-        pass
-    else:
-        _schedule_background_coroutine(
-            log_conversation,
-            log_entry,
-            description="status log",
-            background_tasks=background_tasks,
-        )
+        payload = {}
+    _schedule_background_coroutine(
+        log_call_event,  # type: ignore[misc]
+        CallEvent(call_sid=sid, event=call_status or "(unknown)", payload=payload),  # type: ignore[misc]
+        description="call event",
+        background_tasks=background_tasks,
+    )
 
     if call_status in {"completed", "failed", "busy", "no-answer", "canceled"}:
         await _close_stream(sid)
 
     return PlainTextResponse("ok", status_code=200)
 
-# ----------------------------------------------------------------------------
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Call management helpers
-# ----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 @app.get("/call/{sid}")
 async def call_status(sid: str, client: TwilioClient = Depends(twilio_client)):
     call = await run_in_threadpool(client.calls(sid).fetch)
     return {"sid": call.sid, "status": call.status}
+
 
 @app.post("/call/{sid}/cancel")
 async def call_cancel(sid: str, client: TwilioClient = Depends(twilio_client)):
     call = await run_in_threadpool(client.calls(sid).update, status="canceled")
     return {"sid": call.sid, "status": call.status}
 
+
 @app.post("/call/{sid}/end")
 async def call_end(sid: str, client: TwilioClient = Depends(twilio_client)):
     call = await run_in_threadpool(client.calls(sid).update, status="completed")
     return {"sid": call.sid, "status": call.status}
 
-# ----------------------------------------------------------------------------
-# SSE (per-call) with heartbeat to survive proxies
-# ----------------------------------------------------------------------------
-# Stores per-call configuration (script_id/system_prompt)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SSE (per-call) with heartbeat to ride through proxies
+# ──────────────────────────────────────────────────────────────────────────────
 _call_configs: Dict[str, Dict[str, Optional[str]]] = {}
 _event_queues: Dict[str, asyncio.Queue[str]] = {}
 _audio_streams: Dict[str, asyncio.Queue[Optional[bytes]]] = {}
@@ -533,16 +588,22 @@ _audio_stream_tasks: Dict[str, asyncio.Task] = {}
 _user_activity_events: Dict[str, asyncio.Event] = {}
 
 
-async def _stop_audio_stream(sid: str) -> None:
-    queue = _audio_streams.pop(sid, None)
-    if queue is not None:
-        await queue.put(None)
+async def _enqueue(sid: str, payload: dict) -> None:
+    q = _event_queues.get(sid)
+    if q is None:
+        q = asyncio.Queue()
+        _event_queues[sid] = q
+    await q.put(json.dumps(payload))
 
-    task = _audio_stream_tasks.pop(sid, None)
-    if task is not None:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+
+async def _close_stream(sid: str) -> None:
+    q = _event_queues.get(sid)
+    if q:
+        await q.put("[DONE]")
+    _event_queues.pop(sid, None)
+    _call_configs.pop(sid, None)
+    _user_activity_events.pop(sid, None)
+    await _stop_audio_stream(sid)
 
 
 def _mark_user_activity(sid: str) -> None:
@@ -557,6 +618,17 @@ def _prepare_for_next_user_activity(sid: str) -> asyncio.Event:
     return event
 
 
+async def _stop_audio_stream(sid: str) -> None:
+    queue = _audio_streams.pop(sid, None)
+    if queue is not None:
+        await queue.put(None)
+
+    task = _audio_stream_tasks.pop(sid, None)
+    if task is not None:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
 
 async def _stream_reply_audio(
     *,
@@ -568,6 +640,10 @@ async def _stream_reply_audio(
     system_prompt: Optional[str],
     output_path: str,
 ) -> None:
+    _require_local_module("app.voicebot.stream_coldcall_reply", stream_coldcall_reply)
+    _require_local_module("agent.speak.stream_text_to_speech", stream_text_to_speech)
+    _require_local_module("app.backend.supabase_logger.log_conversation", log_conversation)
+
     append = False
     parts: list[str] = []
     first_chunk_event = asyncio.Event()
@@ -585,21 +661,12 @@ async def _stream_reply_audio(
             if first_chunk_event.is_set():
                 return
 
-            await _enqueue(
-                sid,
-                {
-                    "event": "backchannel",
-                    "sid": sid,
-                    "detail": BACKCHANNEL_TEXT,
-                },
-            )
+            await _enqueue(sid, {"event": "backchannel", "sid": sid, "detail": BACKCHANNEL_TEXT})
 
             async with write_lock:
                 wrote_audio = False
-                async for audio_chunk in stream_text_to_speech(
-                    BACKCHANNEL_TEXT,
-                    output_path=output_path,
-                    append=append,
+                async for audio_chunk in stream_text_to_speech(  # type: ignore[misc]
+                    BACKCHANNEL_TEXT, output_path=output_path, append=append
                 ):
                     if first_chunk_event.is_set():
                         break
@@ -615,8 +682,8 @@ async def _stream_reply_audio(
     backchannel_task = asyncio.create_task(_emit_backchannel())
 
     try:
-        async for chunk in stream_coldcall_reply(messages, is_first_turn=is_first_turn):
-            text = chunk.strip()
+        async for chunk in stream_coldcall_reply(messages, is_first_turn=is_first_turn):  # type: ignore[misc]
+            text = (chunk or "").strip()
             if not text:
                 continue
 
@@ -625,10 +692,8 @@ async def _stream_reply_audio(
 
             async with write_lock:
                 wrote_audio = False
-                async for audio_chunk in stream_text_to_speech(
-                    text,
-                    output_path=output_path,
-                    append=append,
+                async for audio_chunk in stream_text_to_speech(  # type: ignore[misc]
+                    text, output_path=output_path, append=append
                 ):
                     wrote_audio = True
                     await queue.put(audio_chunk)
@@ -649,30 +714,26 @@ async def _stream_reply_audio(
                 },
             )
 
-            try:
-                await log_conversation(
-                    ConversationLog(user_input=user_input, bot_reply=final_text)
+            with contextlib.suppress(Exception):
+                await log_conversation(  # type: ignore[misc]
+                    ConversationLog(user_input=user_input, bot_reply=final_text)  # type: ignore[misc]
                 )
-            except Exception:
-                pass
 
-        # Prepare to detect the next user utterance (for continuation or cancellation).
+        # Prepare to detect next user utterance (continuation/cancel)
         next_activity_event = _prepare_for_next_user_activity(sid)
 
         async def _stream_continuation() -> None:
             nonlocal append
-            continuation_messages = list(messages) + [
-                {"role": "assistant", "content": final_text}
-            ]
+            continuation_messages = list(messages) + [{"role": "assistant", "content": final_text}]
             continuation_parts: list[str] = []
 
-            async for chunk in stream_coldcall_reply(
+            async for chunk in stream_coldcall_reply(  # type: ignore[misc]
                 continuation_messages, is_first_turn=False
             ):
                 if next_activity_event.is_set():
                     return
 
-                text = chunk.strip()
+                text = (chunk or "").strip()
                 if not text:
                     continue
 
@@ -680,10 +741,8 @@ async def _stream_reply_audio(
 
                 async with write_lock:
                     wrote_audio = False
-                    async for audio_chunk in stream_text_to_speech(
-                        text,
-                        output_path=output_path,
-                        append=append,
+                    async for audio_chunk in stream_text_to_speech(  # type: ignore[misc]
+                        text, output_path=output_path, append=append
                     ):
                         if next_activity_event.is_set():
                             break
@@ -694,47 +753,23 @@ async def _stream_reply_audio(
 
             follow_up = " ".join(continuation_parts).strip()
             if follow_up and not next_activity_event.is_set():
-                await _enqueue(
-                    sid,
-                    {
-                        "event": "continuation",
-                        "sid": sid,
-                        "bot_reply": follow_up,
-                    },
-                )
+                await _enqueue(sid, {"event": "continuation", "sid": sid, "bot_reply": follow_up})
 
-                try:
-                    await log_conversation(
-                        ConversationLog(
-                            user_input="[silence continuation]", bot_reply=follow_up
-                        )
+                with contextlib.suppress(Exception):
+                    await log_conversation(  # type: ignore[misc]
+                        ConversationLog(user_input="[silence continuation]", bot_reply=follow_up)  # type: ignore[misc]
                     )
-                except Exception:
-                    pass
 
-        if (
-            is_first_turn
-            and final_text
-            and CONTINUATION_SILENCE_SECONDS > 0
-        ):
+        if is_first_turn and final_text and CONTINUATION_SILENCE_SECONDS > 0:
             try:
-                await asyncio.wait_for(
-                    next_activity_event.wait(), timeout=CONTINUATION_SILENCE_SECONDS
-                )
+                await asyncio.wait_for(next_activity_event.wait(), timeout=CONTINUATION_SILENCE_SECONDS)
             except asyncio.TimeoutError:
                 await _stream_continuation()
 
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        await _enqueue(
-            sid,
-            {
-                "event": "error",
-                "sid": sid,
-                "detail": f"Streaming pipeline failed: {exc}",
-            },
-        )
+        await _enqueue(sid, {"event": "error", "sid": sid, "detail": f"Streaming pipeline failed: {exc}"})
     finally:
         if not backchannel_task.done():
             backchannel_task.cancel()
@@ -748,37 +783,22 @@ async def _stream_reply_audio(
         if current is not None and _audio_stream_tasks.get(sid) is current:
             _audio_stream_tasks.pop(sid, None)
 
-async def _enqueue(sid: str, payload: dict) -> None:
-    q = _event_queues.get(sid)
-    if q is None:
-        q = asyncio.Queue()
-        _event_queues[sid] = q
-    await q.put(json.dumps(payload))
-
-async def _close_stream(sid: str) -> None:
-    q = _event_queues.get(sid)
-    if q:
-        await q.put("[DONE]")
-    _event_queues.pop(sid, None)
-    _call_configs.pop(sid, None)
-    _user_activity_events.pop(sid, None)
-    await _stop_audio_stream(sid)
 
 @app.get("/sse")
 @app.get("/mcp/sse")
 async def sse(
-     sid: Optional[str] = None,
-    lead_name: Optional[str] = None,
+    sid: Optional[str] = None,
+    lead_name: Optional[str] = None,  # kept for forward-compat UI
     phone: Optional[str] = None,
     property_type: Optional[str] = None,
     location_area: Optional[str] = None,
     callback_offer: Optional[str] = None,
 ):
+    # If we have a real call stream, bridge it out
     if sid:
         q = _event_queues.setdefault(sid, asyncio.Queue())
 
         async def gen():
- 
             async def heartbeat():
                 while True:
                     await asyncio.sleep(20)
@@ -788,9 +808,7 @@ async def sse(
             while True:
                 msg_task = asyncio.create_task(q.get())
                 hb_task = asyncio.create_task(hb.__anext__())
-                done, _ = await asyncio.wait(
-                    {msg_task, hb_task}, return_when=asyncio.FIRST_COMPLETED
-                )
+                done, _ = await asyncio.wait({msg_task, hb_task}, return_when=asyncio.FIRST_COMPLETED)
 
                 if msg_task in done:
                     msg = msg_task.result()
@@ -803,33 +821,51 @@ async def sse(
 
         return EventSourceResponse(gen())
 
-    async def gen_openai():
-        response = await openai_client.chat.completions.create(
-            model="gpt-4",
-            messages=[{"role": "user", "content": "hello"}],
-            stream=True,
-        )
-        async for chunk in response:
-            delta = getattr(chunk.choices[0].delta, "content", None)
-            if delta:
-                yield {"event": "message", "data": delta}
+    # Otherwise, demo an OpenAI streamed completion if available
+    if openai_client:
+        async def gen_openai():
+            try:
+                response = await openai_client.chat.completions.create(
+                    model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                    messages=[{"role": "user", "content": "hello"}],
+                    stream=True,
+                )
+                async for chunk in response:
+                    delta = getattr(chunk.choices[0].delta, "content", None)
+                    if delta:
+                        yield {"event": "message", "data": delta}
+            except Exception as e:
+                yield {"event": "error", "data": json.dumps({"detail": str(e)})}
 
-    return EventSourceResponse(gen_openai())
+        return EventSourceResponse(gen_openai())
 
-# ----------------------------------------------------------------------------
+    return EventSourceResponse(lambda: ({"event": "done", "data": "{}"} for _ in []))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Error shaping
-# ----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 @app.exception_handler(HTTPException)
 async def http_exc_handler(_: Request, exc: HTTPException):
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
+
 @app.exception_handler(Exception)
 async def unhandled_exc_handler(_: Request, exc: Exception):
+    logger.exception("Unhandled error")
     return JSONResponse(status_code=500, content={"detail": f"Internal error: {exc}"})
 
-# ----------------------------------------------------------------------------
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Entrypoint (local dev)
-# ----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8080")), reload=False)
+
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8080")),
+        reload=False,
+        log_level=os.getenv("LOG_LEVEL", "info"),
+    )
