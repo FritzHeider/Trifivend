@@ -26,8 +26,17 @@ RUN python -m pip install --upgrade pip && \
 COPY . /app
 ENV PYTHONPATH=/app
 
+# Copy a lightweight entrypoint that defaults to serving the API. The script
+# respects any explicit command provided by Fly's [processes] config, making
+# the same image usable for both the API and UI deployments.
+COPY docker-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 # Expose for clarity (Fly uses internal_port anyway)
 EXPOSE 8080
 
-# Do NOT start the app here; Fly [processes] runs it (uvicorn via fly.api.toml)
-# No CMD/ENTRYPOINT needed — keeps image reusable for API/UI
+# Default to running the FastAPI app. When Fly's [processes] provides a command
+# (e.g. the Streamlit UI), the entrypoint simply execs that command instead.
+ENTRYPOINT ["/entrypoint.sh"]
+CMD []
+
