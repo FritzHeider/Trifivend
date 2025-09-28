@@ -7,7 +7,6 @@ primary_region = "sjc"
     REQS = "/tmp/requirements.backend.txt"
 
 [processes]
-  # If your app lives at app/main.py, change to: uvicorn app.main:app ...
   api = "uvicorn main:app --host 0.0.0.0 --port 8080"
 
 [[services]]
@@ -15,16 +14,14 @@ primary_region = "sjc"
   protocol = "tcp"
   internal_port = 8080
 
-  # Public endpoints
   [[services.ports]]
     port = 80
     handlers = ["http"]
 
   [[services.ports]]
     port = 443
-    handlers = ["tls", "http"]
+    handlers = ["tls","http"]
 
-  # Prefer HTTP health (FastAPI route you expose)
   [[services.http_checks]]
     method = "GET"
     path = "/health"
@@ -32,13 +29,11 @@ primary_region = "sjc"
     timeout  = "2s"
     grace_period = "60s"
 
-  # Backstop TCP check
   [[services.tcp_checks]]
     interval = "15s"
     timeout  = "2s"
     grace_period = "60s"
 
-  # Concurrency guardrails
   [services.concurrency]
     type = "connections"
     soft_limit = 20
