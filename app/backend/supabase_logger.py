@@ -42,7 +42,7 @@ import os
 import json
 import time
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import httpx
 from pydantic import BaseModel, Field, ConfigDict
@@ -55,12 +55,14 @@ logger = logging.getLogger(__name__)
 
 SUPABASE_URL_ENV = "SUPABASE_URL"
 SUPABASE_KEY_ENV = "SUPABASE_SERVICE_ROLE_KEY"   # prefer server key
+ALT_KEY_ENV      = "SUPABASE_SERVICE_KEY"        # legacy alias used in some configs/tests
 FALLBACK_KEY_ENV = "SUPABASE_ANON_KEY"           # fallback if you must
 
 LEADS_TABLE       = os.getenv("SUPABASE_LEADS_TABLE", "leads")
 CONV_TABLE        = os.getenv("SUPABASE_CONVERSATIONS_TABLE", "conversations")
 CALLS_TABLE       = os.getenv("SUPABASE_CALLS_TABLE", "calls")
 CALL_EVENTS_TABLE = os.getenv("SUPABASE_CALL_EVENTS_TABLE", "call_events")
+SCRIPTS_TABLE     = os.getenv("SUPABASE_LEAD_SCRIPTS_TABLE", "lead_scripts")
 
 DEFAULT_TIMEOUT_SECS = float(os.getenv("SUPABASE_HTTP_TIMEOUT", "5"))
 UPSERT_ENABLED       = os.getenv("SUPABASE_UPSERT", "0").strip() in {"1", "true", "True"}
@@ -72,12 +74,20 @@ def _env_supabase() -> Optional[dict]:
     No network calls; never raises at import/startup.
     """
     url = (os.getenv(SUPABASE_URL_ENV) or "").strip()
-    key = (os.getenv(SUPABASE_KEY_ENV) or os.getenv(FALLBACK_KEY_ENV) or "").strip()
+    key = (
+        os.getenv(SUPABASE_KEY_ENV)
+        or os.getenv(ALT_KEY_ENV)
+        or os.getenv(FALLBACK_KEY_ENV)
+        or ""
+    ).strip()
 
     if not url or not key:
         logger.warning(
-            "Supabase disabled (missing %s and/or %s/%s). Logging will be no-op.",
-            SUPABASE_URL_ENV, SUPABASE_KEY_ENV, FALLBACK_KEY_ENV,
+            "Supabase disabled (missing %s and/or %s/%s/%s). Logging will be no-op.",
+            SUPABASE_URL_ENV,
+            SUPABASE_KEY_ENV,
+            ALT_KEY_ENV,
+            FALLBACK_KEY_ENV,
         )
         return None
 
@@ -135,6 +145,16 @@ class CallEvent(BaseModel):
     payload: Dict[str, Any] = Field(default_factory=dict)
 
 
+class LeadScript(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    lead_phone: str
+    script_id: str = Field(default="default")
+    script_text: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Internal helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -154,6 +174,7 @@ async def _rest_insert(
     *,
     on_conflict: Optional[str] = None,   # e.g., "call_sid" when UPSERT_ENABLED=1
     timeout: float = DEFAULT_TIMEOUT_SECS,
+    client: Optional[httpx.AsyncClient] = None,
 ) -> bool:
     """
     Minimal insert via Supabase REST (PostgREST).
@@ -165,22 +186,29 @@ async def _rest_insert(
     """
     cfg = _env_supabase()
     if not cfg:
+        print("Supabase credentials missing; skipping log.")
         return False
 
     url = f"{cfg['url']}/rest/v1/{table}"
-    if UPSERT_ENABLED and on_conflict:
+    if on_conflict:
         url += f"?on_conflict={on_conflict}"
 
+    headers = _headers(cfg["key"])
+    owns_client = client is None
+    http_client = client or httpx.AsyncClient(timeout=timeout)
+
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            r = await client.post(url, headers=_headers(cfg["key"]), content=json.dumps(rows))
-        if 200 <= r.status_code < 300:
+        response = await http_client.post(url, headers=headers, json=rows, timeout=timeout)
+        if 200 <= response.status_code < 300:
             return True
-        logger.warning("Supabase insert to %s failed: %s %s", table, r.status_code, r.text)
+        logger.warning("Supabase insert to %s failed: %s %s", table, response.status_code, response.text)
         return False
     except Exception as e:  # pragma: no cover
         logger.warning("Supabase insert error on %s: %s", table, e)
         return False
+    finally:
+        if owns_client:
+            await http_client.aclose()
 
 
 def _now_ms() -> int:
@@ -191,7 +219,7 @@ def _now_ms() -> int:
 # Public logging API (fire-and-forget; NEVER throws)
 # ──────────────────────────────────────────────────────────────────────────────
 
-async def log_lead(lead: Lead) -> None:
+async def log_lead(lead: Lead, *, client: Optional[httpx.AsyncClient] = None) -> None:
     """
     Insert a single lead row. No-op on failure/misconfig.
     """
@@ -204,12 +232,21 @@ async def log_lead(lead: Lead) -> None:
         "meta": lead.meta or {},
         "created_at_ms": _now_ms(),
     }
-    ok = await _rest_insert(LEADS_TABLE, payload, on_conflict="phone" if UPSERT_ENABLED else None)
+    ok = await _rest_insert(
+        LEADS_TABLE,
+        payload,
+        on_conflict="phone" if UPSERT_ENABLED else None,
+        client=client,
+    )
     if not ok:
         logger.info("Lead log no-op or failed (see warnings).")
 
 
-async def log_conversation(entry: ConversationLog) -> None:
+async def log_conversation(
+    entry: ConversationLog,
+    *,
+    client: Optional[httpx.AsyncClient] = None,
+) -> None:
     """
     Insert a single conversation turn. No-op on failure/misconfig.
     """
@@ -221,12 +258,12 @@ async def log_conversation(entry: ConversationLog) -> None:
         "lead_id": entry.lead_id,
         "created_at_ms": _now_ms(),
     }
-    ok = await _rest_insert(CONV_TABLE, payload)
+    ok = await _rest_insert(CONV_TABLE, payload, client=client)
     if not ok:
         logger.info("Conversation log no-op or failed (see warnings).")
 
 
-async def log_call(call: Call) -> None:
+async def log_call(call: Call, *, client: Optional[httpx.AsyncClient] = None) -> None:
     """
     Insert a `calls` row. Pass whatever you have; extras ignored by model.
     Examples:
@@ -244,12 +281,21 @@ async def log_call(call: Call) -> None:
         "meta": call.meta or {},
         "created_at_ms": _now_ms(),
     }
-    ok = await _rest_insert(CALLS_TABLE, payload, on_conflict="call_sid" if UPSERT_ENABLED else None)
+    ok = await _rest_insert(
+        CALLS_TABLE,
+        payload,
+        on_conflict="call_sid" if UPSERT_ENABLED else None,
+        client=client,
+    )
     if not ok:
         logger.info("Call log no-op or failed (see warnings).")
 
 
-async def log_call_event(event: CallEvent) -> None:
+async def log_call_event(
+    event: CallEvent,
+    *,
+    client: Optional[httpx.AsyncClient] = None,
+) -> None:
     """
     Insert a `call_events` row. Capture arbitrary Twilio webhook payloads safely.
     Examples:
@@ -262,16 +308,95 @@ async def log_call_event(event: CallEvent) -> None:
         "payload": event.payload or {},
         "created_at_ms": _now_ms(),
     }
-    ok = await _rest_insert(CALL_EVENTS_TABLE, payload)
+    ok = await _rest_insert(CALL_EVENTS_TABLE, payload, client=client)
     if not ok:
         logger.info("Call event log no-op or failed (see warnings).")
+
+
+async def log_script(
+    script: LeadScript,
+    *,
+    client: Optional[httpx.AsyncClient] = None,
+) -> None:
+    """Persist a lead script (upsert on lead_phone + script_id)."""
+
+    payload = {
+        "lead_phone": script.lead_phone,
+        "script_id": script.script_id,
+        "script_text": script.script_text,
+        "meta": script.meta or {},
+        "created_at": script.created_at,
+        "updated_at": script.updated_at,
+        "created_at_ms": _now_ms(),
+    }
+
+    ok = await _rest_insert(
+        SCRIPTS_TABLE,
+        payload,
+        on_conflict="lead_phone,script_id",
+        client=client,
+    )
+    if not ok:
+        logger.info("Lead script log no-op or failed (see warnings).")
+
+
+async def get_script(
+    lead_phone: str,
+    script_id: str = "default",
+    *,
+    client: Optional[httpx.AsyncClient] = None,
+) -> Optional[LeadScript]:
+    """Fetch a stored lead script by phone + id."""
+
+    cfg = _env_supabase()
+    if not cfg:
+        print("Supabase credentials missing; cannot fetch lead script.")
+        return None
+
+    url = f"{cfg['url']}/rest/v1/{SCRIPTS_TABLE}"
+    params = {
+        "lead_phone": f"eq.{lead_phone}",
+        "script_id": f"eq.{script_id}",
+        "select": "*",
+        "limit": 1,
+    }
+
+    headers = _headers(cfg["key"])
+    owns_client = client is None
+    http_client = client or httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECS)
+
+    try:
+        response = await http_client.get(url, headers=headers, params=params, timeout=DEFAULT_TIMEOUT_SECS)
+        if response.status_code != 200:
+            logger.warning(
+                "Supabase fetch from %s failed: %s %s",
+                SCRIPTS_TABLE,
+                response.status_code,
+                response.text,
+            )
+            return None
+
+        data = response.json() or []
+        if not data:
+            return None
+        return LeadScript.model_validate(data[0])
+    except Exception as e:  # pragma: no cover
+        logger.warning("Supabase fetch error on %s: %s", SCRIPTS_TABLE, e)
+        return None
+    finally:
+        if owns_client:
+            await http_client.aclose()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Bulk helpers (small batches; safe no-throw)
 # ──────────────────────────────────────────────────────────────────────────────
 
-async def bulk_log_call_events(events: Sequence[CallEvent]) -> None:
+async def bulk_log_call_events(
+    events: Sequence[CallEvent],
+    *,
+    client: Optional[httpx.AsyncClient] = None,
+) -> None:
     """
     Efficiently insert many call_events at once.
     """
@@ -284,12 +409,16 @@ async def bulk_log_call_events(events: Sequence[CallEvent]) -> None:
         "payload": e.payload or {},
         "created_at_ms": _now_ms(),
     } for e in events]
-    ok = await _rest_insert(CALL_EVENTS_TABLE, rows)
+    ok = await _rest_insert(CALL_EVENTS_TABLE, rows, client=client)
     if not ok:
         logger.info("Bulk call event log no-op or failed (see warnings).")
 
 
-async def bulk_log_conversations(entries: Sequence[ConversationLog]) -> None:
+async def bulk_log_conversations(
+    entries: Sequence[ConversationLog],
+    *,
+    client: Optional[httpx.AsyncClient] = None,
+) -> None:
     """
     Bulk insert for conversation turns (useful for imports/backfills).
     """
@@ -303,6 +432,6 @@ async def bulk_log_conversations(entries: Sequence[ConversationLog]) -> None:
         "lead_id": e.lead_id,
         "created_at_ms": _now_ms(),
     } for e in entries]
-    ok = await _rest_insert(CONV_TABLE, rows)
+    ok = await _rest_insert(CONV_TABLE, rows, client=client)
     if not ok:
         logger.info("Bulk conversation log no-op or failed (see warnings).")

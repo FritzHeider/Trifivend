@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+from types import SimpleNamespace
 from typing import Optional
 
 from app.openai_compat import (
@@ -19,13 +20,25 @@ logger = logging.getLogger(__name__)
 
 # Lazily created client cache (no import-time side effects)
 _client = None
+# Alias exported for tests/consumers that expect a module-level client handle
+client = SimpleNamespace(
+    audio=SimpleNamespace(transcriptions=SimpleNamespace(create=None)),
+    _is_stub=True,
+)
 
 
 def _get_client():
     """Create/reuse a sync OpenAI client. Never raises at import time."""
-    global _client
+    global _client, client
     if _client is not None:
         return _client
+
+    if getattr(client, "_is_stub", False):
+        create_attr = getattr(getattr(client.audio, "transcriptions", SimpleNamespace()), "create", None)
+        if create_attr:
+            client._is_stub = False  # type: ignore[attr-defined]
+            _client = client  # type: ignore[assignment]
+            return _client
 
     if not is_openai_available():
         msg = missing_openai_error()
@@ -41,6 +54,7 @@ def _get_client():
         raise RuntimeError("Failed to instantiate OpenAI client (see logs).")
 
     _client = client
+    globals()["client"] = client
     return _client
 
 
