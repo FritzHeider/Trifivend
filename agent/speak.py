@@ -11,6 +11,7 @@ from typing import Optional, Tuple, Dict, Any
 
 import aiofiles
 import httpx
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -191,9 +192,9 @@ def _get_async_client() -> httpx.AsyncClient:
 # ----------------------------- Public API ------------------------------------
 def speak_text(
     text: str,
+    output_path: str | None = None,
     *,
-    output_path: str = "/tmp/response.mp3",
-    timeout: float = 15.0,
+    timeout: float = 10.0,
     voice_id: Optional[str] = None,
     api_key: Optional[str] = None,
     locale: Optional[str] = None,
@@ -210,7 +211,10 @@ def speak_text(
       - Pass `locale="en-US"` (or set ELEVENLABS_LOCALE) to auto-pick a voice via ELEVENLABS_VOICE_MAP.
       - Explicit `voice_id` and ELEVENLABS_VOICE_ID override locale routing.
     """
-    key, vid = _resolve_eleven_config(voice_id=voice_id, api_key=api_key, locale=locale)
+    try:
+        key, vid = _resolve_eleven_config(voice_id=voice_id, api_key=api_key, locale=locale)
+    except RuntimeError as exc:
+        raise RuntimeError(f"ElevenLabs TTS failed: {exc}") from exc
     voice_settings = _resolve_preset_settings(
         preset,
         stability=stability,
@@ -219,24 +223,25 @@ def speak_text(
         use_speaker_boost=use_speaker_boost,
     )
 
+    target_path = output_path or "/tmp/response.mp3"
+
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{vid}"
     headers = {"xi-api-key": key, "Content-Type": "application/json", "Accept": "audio/mpeg"}
     payload = {"text": text, "voice_settings": voice_settings}
 
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(target_path) or ".", exist_ok=True)
 
     try:
-        with httpx.Client(timeout=timeout, http2=True) as client:
-            resp = client.post(url, headers=headers, json=payload)
-            resp.raise_for_status()
-            with open(output_path, "wb") as f:
-                f.write(resp.content)
-    except httpx.HTTPStatusError as e:
+        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        resp.raise_for_status()
+        with open(target_path, "wb") as f:
+            f.write(resp.content)
+    except requests.HTTPError as e:
         raise RuntimeError(_shape_http_error("ElevenLabs TTS failed", e)) from e
-    except Exception as e:
+    except requests.RequestException as e:
         raise RuntimeError(f"ElevenLabs TTS failed: {e}") from e
 
-    return output_path
+    return target_path
 
 
 async def stream_text_to_speech(
@@ -260,7 +265,10 @@ async def stream_text_to_speech(
     Async streaming TTS → yields chunks while persisting to disk.
     Locale routing works the same as `speak_text`.
     """
-    key, vid = _resolve_eleven_config(voice_id=voice_id, api_key=api_key, locale=locale)
+    try:
+        key, vid = _resolve_eleven_config(voice_id=voice_id, api_key=api_key, locale=locale)
+    except RuntimeError as exc:
+        raise RuntimeError(f"ElevenLabs streaming TTS failed: {exc}") from exc
     voice_settings = _resolve_preset_settings(
         preset,
         stability=stability,
@@ -318,9 +326,22 @@ async def stream_text_to_speech(
         raise RuntimeError(f"ElevenLabs streaming TTS failed: {e}") from e
 
 
-def _shape_http_error(prefix: str, e: httpx.HTTPStatusError) -> str:
-    try:
-        detail = e.response.json()
-    except Exception:
-        detail = e.response.text
-    return f"{prefix}: {e.response.status_code} {e.request.method} {e.request.url}. Detail: {detail}"
+def _shape_http_error(prefix: str, e: Exception) -> str:
+    response = getattr(e, "response", None)
+    request = getattr(e, "request", None)
+
+    status = getattr(response, "status_code", "?")
+    method = getattr(request, "method", "?")
+    url_obj = getattr(request, "url", None)
+    url = str(url_obj) if url_obj is not None else "?"
+
+    detail: str | Any
+    if response is not None:
+        try:
+            detail = response.json()
+        except Exception:
+            detail = getattr(response, "text", "")
+    else:
+        detail = ""
+
+    return f"{prefix}: {status} {method} {url}. Detail: {detail}"

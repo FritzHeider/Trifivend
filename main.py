@@ -519,6 +519,7 @@ async def twilio_partial(request: Request) -> Response:
 @app.post("/status")
 async def status_webhook(request: Request, background_tasks: BackgroundTasks):
     _require_local_module("app.backend.supabase_logger.log_call_event", log_call_event)
+    _require_local_module("app.backend.supabase_logger.log_conversation", log_conversation)
 
     form = await request.form()
     sid = (form.get("CallSid") or "").strip()
@@ -548,6 +549,22 @@ async def status_webhook(request: Request, background_tasks: BackgroundTasks):
         log_call_event,  # type: ignore[misc]
         CallEvent(call_sid=sid, event=call_status or "(unknown)", payload=payload),  # type: ignore[misc]
         description="call event",
+        background_tasks=background_tasks,
+    )
+
+    status_meta = {
+        "call_sid": sid,
+        "event": "status",
+        "payload": payload,
+    }
+    _schedule_background_coroutine(
+        log_conversation,  # type: ignore[misc]
+        ConversationLog(
+            user_input="[status update]",
+            bot_reply=call_status or "(unknown)",
+            meta=status_meta,
+        ),
+        description="status log",
         background_tasks=background_tasks,
     )
 
