@@ -4,20 +4,20 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PORT=8080
+    PORT=8080 \
+    HOST=0.0.0.0 \
+    APP_MODULE=main:app
 
 WORKDIR /app
 
-# System deps (keep minimal)
+# Minimal system deps
 RUN apt-get update -y && apt-get install -y --no-install-recommends \
     build-essential curl ca-certificates git \
  && rm -rf /var/lib/apt/lists/*
 
-# Provide both requirement files; pick one via build arg
+# Requirements (both files available; pick via REQS if you reuse the image for UI)
 COPY requirements.backend.txt /tmp/requirements.backend.txt
 COPY requirements.ui.txt      /tmp/requirements.ui.txt
-
-# Choose which set to install at build time
 ARG REQS=/tmp/requirements.backend.txt
 RUN python -m pip install --upgrade pip && \
     python -m pip install --no-cache-dir -r "$REQS"
@@ -26,17 +26,12 @@ RUN python -m pip install --upgrade pip && \
 COPY . /app
 ENV PYTHONPATH=/app
 
-# Copy a lightweight entrypoint that defaults to serving the API. The script
-# respects any explicit command provided by Fly's [processes] config, making
-# the same image usable for both the API and UI deployments.
+# Lightweight entrypoint that respects Fly's [processes] command
 COPY docker-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# Expose for clarity (Fly uses internal_port anyway)
 EXPOSE 8080
 
-# Default to running the FastAPI app. When Fly's [processes] provides a command
-# (e.g. the Streamlit UI), the entrypoint simply execs that command instead.
+# Important: keep ENTRYPOINT; let it exec either Fly's command or default API
 ENTRYPOINT ["/entrypoint.sh"]
 CMD []
-
