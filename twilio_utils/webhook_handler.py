@@ -8,7 +8,7 @@ try:
 except ImportError:  # pragma: no cover - fallback for production
     from app.voicebot import coldcall_lead
 
-APP_BASE_URL = os.getenv("APP_BASE_URL", "https://your-app.fly.dev")
+APP_BASE_URL = os.getenv("APP_BASE_URL", "https://ai-callbot.fly.dev")
 
 app = FastAPI()
 

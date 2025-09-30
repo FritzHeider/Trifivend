@@ -40,6 +40,7 @@ Thumbs.db
 
 # dotenv / secrets
 .env
+.env.fly
 .env.*
 secrets.toml
 
