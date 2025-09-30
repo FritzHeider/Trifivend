@@ -1,19 +1,15 @@
-#!/bin/sh
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-# If Fly passed a command (via [processes] or docker run CMD), run that.
-# Handle both: a single string or tokenized args.
-if [ "$#" -gt 0 ]; then
-  # Recompose args into a single shell line to support Fly's single-string form
-  # as well as tokenized forms.
-  exec sh -lc "$*"
+# Ensure PORT is honored (Fly sets $PORT)
+export PORT="${PORT:-8080}"
+
+# Basic logging level normalization for child processes if you pass LOG_LEVEL=info
+if [[ -n "${LOG_LEVEL:-}" ]]; then
+  export LOG_LEVEL_UPPER="$(echo "$LOG_LEVEL" | tr '[:lower:]' '[:upper:]')"
+else
+  export LOG_LEVEL_UPPER="INFO"
 fi
 
-# Default to serving the FastAPI app if no command was provided.
-: "${PORT:=8080}"
-: "${HOST:=0.0.0.0}"
-: "${APP_MODULE:=main:app}"
-
-# Sanity echo (shows up once in logs)
-echo "Starting uvicorn ${APP_MODULE} on ${HOST}:${PORT}"
-exec uvicorn "${APP_MODULE}" --host "${HOST}" --port "${PORT}"
+echo "[entrypoint] Starting: $* on 0.0.0.0:${PORT} (LOG_LEVEL=${LOG_LEVEL_UPPER})"
+exec "$@"

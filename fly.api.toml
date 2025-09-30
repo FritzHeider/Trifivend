@@ -1,34 +1,39 @@
+# fly.api.toml — ai-callbot (backend)
 app = "ai-callbot"
 primary_region = "sjc"
 
+[env]
+  PORT = "8080"
+  APP_BASE_URL = "https://ai-callbot.fly.dev"
+
 [build]
   dockerfile = "Dockerfile"
-  [build.args]
-    REQS = "/tmp/requirements.backend.txt"
-
-[processes]
-  api = "uvicorn main:app --host 0.0.0.0 --port 8080"
 
 [[services]]
-  processes = ["api"]
-  protocol = "tcp"
   internal_port = 8080
+  processes = ["app"]
+  protocol = "tcp"
 
   [[services.ports]]
-    port = 80
     handlers = ["http"]
+    port = 80
+
   [[services.ports]]
+    handlers = ["tls", "http"]
     port = 443
-    handlers = ["tls","http"]
 
-  [[services.http_checks]]
-    method = "GET"
-    path = "/health"
-    interval = "10s"
-    timeout  = "2s"
-    grace_period = "60s"
+  [services.concurrency]
+    type = "requests"
+    hard_limit = 200
+    soft_limit = 150
 
-  [[services.tcp_checks]]
-    interval = "15s"
-    timeout  = "2s"
-    grace_period = "60s"
+# Health check with a gentle grace period so logs don't flap during boot
+[[checks]]
+  type = "http"
+  name = "api-health"
+  port = 8080
+  interval = "5s"
+  timeout = "2s"
+  grace_period = "20s"
+  method = "get"
+  path = "/health"
