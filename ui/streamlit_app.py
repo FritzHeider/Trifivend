@@ -237,6 +237,7 @@ def _shape_call_payload(
     }
 
     expected_fields: list[str] = []
+    required_fields: set[str] = set()
     if openapi:
         try:
             call_op = openapi["paths"]["/call"]["post"]
@@ -255,6 +256,7 @@ def _shape_call_payload(
             schema = deref(schema)
             props = schema.get("properties", {})
             expected_fields = list(props.keys())
+            required_fields = set(schema.get("required", []))
         except Exception as e:
             print(f"OpenAPI parse error: {e}")
             expected_fields = []
@@ -270,6 +272,17 @@ def _shape_call_payload(
                 if s in candidates and candidates[s] not in (None, "", []):
                     val = candidates[s]
                     break
+            if val is None and field in required_fields:
+                # For required fields, fall back to sending empty strings instead
+                # of omitting them entirely. The backend accepts empty strings but
+                # rejects missing required keys, so this matches the non-OpenAPI
+                # payload behaviour where we always included these fields.
+                for s in sources:
+                    if s in candidates and candidates[s] is not None:
+                        val = candidates[s]
+                        break
+                if val is None:
+                    val = ""
             if val is not None:
                 payload[field] = val
     else:
