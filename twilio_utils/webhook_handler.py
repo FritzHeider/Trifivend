@@ -1,14 +1,26 @@
 import os
+
 from fastapi import FastAPI, Form
 from fastapi.responses import Response
 from fastapi.concurrency import run_in_threadpool
+
 from agent.speak import speak_text
+
 try:
     from app.voicebot import coldcall_lead
 except ImportError:  # pragma: no cover - fallback for production
     from app.voicebot import coldcall_lead
 
-APP_BASE_URL = os.getenv("APP_BASE_URL", "https://ai-callbot.fly.dev")
+
+def _resolve_app_base_url() -> str:
+    """Return the base URL the webhook should use for generated audio."""
+
+    default_base = "https://your-app.fly.dev"
+    raw = os.getenv("APP_BASE_URL", "").strip()
+    return (raw or default_base).rstrip("/")
+
+
+APP_BASE_URL = _resolve_app_base_url()
 
 app = FastAPI()
 
