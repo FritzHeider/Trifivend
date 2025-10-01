@@ -1,5 +1,5 @@
 # fly.ui.toml — example if you host UI on Fly too
-app = "ai-callbot-ui"
+app = "trifivend-ui"
 primary_region = "sjc"
 
 [build]

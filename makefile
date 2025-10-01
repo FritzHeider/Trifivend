@@ -4,7 +4,7 @@ SHELL := /bin/bash
 .ONESHELL:
 
 APP_NAME_API := ai-callbot
-APP_NAME_UI  := ai-callbot-ui
+APP_NAME_UI  := trifivend-ui
 
 CONFIG_API   := fly.api.toml
 CONFIG_UI    := fly.ui.toml
@@ -14,7 +14,7 @@ CONFIG_UI    := fly.ui.toml
 help:
 	@echo "Targets:"
 	@echo "  deploy-api        Build & deploy backend (ai-callbot)"
-	@echo "  deploy-ui         Build & deploy UI (ai-callbot-ui)"
+	@echo "  deploy-ui         Build & deploy UI (trifivend-ui)"
 	@echo "  deploy-both       Deploy both API and UI"
 	@echo "  logs-api|logs-ui  Tail logs"
 	@echo "  status-api|status-ui Show app status"

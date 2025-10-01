@@ -1,7 +1,7 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 
-APP_NAME="ai-callbot-ui"
+APP_NAME="trifivend-ui"
 CONFIG="fly.ui.toml"
 
 echo "🚀 Deploying $APP_NAME using $CONFIG..."
