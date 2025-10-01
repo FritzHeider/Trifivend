@@ -11,7 +11,6 @@ primary_region = "sjc"
 
 [[services]]
   internal_port = 8080
-  processes = ["app"]
   protocol = "tcp"
 
   [[services.ports]]
@@ -34,6 +33,6 @@ primary_region = "sjc"
   port = 8080
   interval = "5s"
   timeout = "2s"
-  grace_period = "20s"
+  grace_period = "40s"
   method = "get"
   path = "/health"
