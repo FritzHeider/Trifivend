@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy backend requirements and install the full dependency set
 COPY requirements.backend.txt ./requirements.backend.txt
 
-RUN python -m pip install --upgrade pip && \
+RUN python -m pip install --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.backend.txt
 
 # Copy app
