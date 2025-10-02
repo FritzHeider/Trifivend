@@ -30,7 +30,6 @@ from fastapi.responses import (
     JSONResponse,
     PlainTextResponse,
     Response,
-    StreamingResponse,
 )
 from pydantic import BaseModel, Field
 from pydantic import AliasChoices, ConfigDict, field_validator  # Pydantic v2
@@ -55,7 +54,7 @@ logger = logging.getLogger("trifivend.api")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
-# Public base of THIS backend (Twilio + MCP require public HTTPS)
+# Public base of THIS backend (Twilio requires absolute HTTPS URLs)
 APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8080").rstrip("/")
 
 # Twilio config
@@ -64,12 +63,9 @@ TWILIO_AUTH_TOKEN = (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
 # tolerate occasional typo TWILLO_NUMBER
 TWILIO_NUMBER = (os.getenv("TWILLO_NUMBER") or os.getenv("TWILIO_NUMBER") or "").strip()
 
-# Backchannel/latency tuning
-BACKCHANNEL_DELAY_MS = float(os.getenv("BACKCHANNEL_DELAY_MS", "300"))
-BACKCHANNEL_TEXT = os.getenv("BACKCHANNEL_TEXT", "One sec…")
-CONTINUATION_SILENCE_SECONDS = float(os.getenv("CONTINUATION_SILENCE_SECONDS", "2.0"))
+# Voice flow tuning
+GATHER_SPEECH_TIMEOUT = os.getenv("GATHER_SPEECH_TIMEOUT", "0.3")  # Twilio expects string/number
 SYSTEM_PROMPT_TOKEN_LIMIT = int(os.getenv("SYSTEM_PROMPT_TOKEN_LIMIT", "300"))
-GATHER_SPEECH_TIMEOUT = os.getenv("GATHER_SPEECH_TIMEOUT", "0.3")  # Twilio expects str/number
 
 # Simple script registry (extend as needed)
 SCRIPTS: Dict[str, Dict[str, str]] = {
@@ -106,8 +102,8 @@ if not is_openai_available():
 # ──────────────────────────────────────────────────────────────────────────────
 try:
     from agent.listen import transcribe_audio
-    from agent.speak import speak_text, stream_text_to_speech
-    from app.voicebot import coldcall_lead, stream_coldcall_reply
+    from agent.speak import speak_text  # still used by /transcribe fallback
+    from app.voicebot import coldcall_lead
     from app.backend.supabase_logger import (
         ConversationLog,
         Lead,
@@ -122,9 +118,7 @@ except Exception as e:
     logger.warning("Deferred import of local modules due to: %s", e)
     transcribe_audio = None  # type: ignore
     speak_text = None  # type: ignore
-    stream_text_to_speech = None  # type: ignore
     coldcall_lead = None  # type: ignore
-    stream_coldcall_reply = None  # type: ignore
     ConversationLog = None  # type: ignore
     Lead = None  # type: ignore
     Call = None  # type: ignore
@@ -133,6 +127,13 @@ except Exception as e:
     log_lead = None  # type: ignore
     log_call = None  # type: ignore
     log_call_event = None  # type: ignore
+
+# TTS chunker → Supabase signed URLs (CDN-backed)
+try:
+    from tts_chunker import tts_chunks_to_signed_urls  # returns List[str] of signed MP3 URLs
+except Exception as e:
+    tts_chunks_to_signed_urls = None  # type: ignore
+    logger.warning("tts_chunker not importable: %s", e)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Utilities
@@ -187,7 +188,7 @@ def twilio_client() -> TwilioClient:
 # ──────────────────────────────────────────────────────────────────────────────
 # FastAPI app & CORS
 # ──────────────────────────────────────────────────────────────────────────────
-app = FastAPI(title="Trifivend Backend", version="1.1.0")
+app = FastAPI(title="Trifivend Backend", version="1.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -204,7 +205,7 @@ def _mcp_guard(secret: str = Header(None)) -> None:
     expected = os.getenv("MCP_SHARED_SECRET", "")
     if not expected:
         # if guard not configured, allow but warn
-        logger.warning("MCP_SHARED_SECRET not set; /mcp/* endpoints are unprotected")
+        logger.warning("MCP_SECRET not set; /mcp/* endpoints are unprotected")
         return
     if secret != expected:
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -263,7 +264,7 @@ def health() -> HealthOut:
     )
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Audio transcription → reply → speech → log
+# Audio transcription → reply → speech → log (non-call path)
 # ──────────────────────────────────────────────────────────────────────────────
 @app.post("/transcribe")
 async def transcribe(
@@ -291,7 +292,10 @@ async def transcribe(
             coldcall_lead, [{"role": "user", "content": user_input}]  # type: ignore[misc]
         )
 
+        # Non-blocking TTS to /tmp/response.mp3 (legacy dev path)
         background_tasks.add_task(run_in_threadpool, speak_text, bot_reply)  # type: ignore[arg-type]
+
+        # Log convo (best-effort)
         _schedule_background_coroutine(
             log_conversation,  # type: ignore[misc]
             ConversationLog(user_input=user_input, bot_reply=bot_reply),  # type: ignore[misc]
@@ -308,7 +312,7 @@ async def transcribe(
             os.remove(tmp_path)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Audio endpoints (stream + file)
+# Audio endpoints (legacy dev: serve last /tmp file)
 # ──────────────────────────────────────────────────────────────────────────────
 @app.get("/audio/response.mp3")
 async def serve_audio():
@@ -316,31 +320,6 @@ async def serve_audio():
     if not os.path.exists(path):
         return JSONResponse({"error": "No audio available"}, status_code=404)
     return FileResponse(path, media_type="audio/mpeg")
-
-
-@app.get("/audio/response-file")
-async def response_file(sid: str):
-    """Non-streaming per-call file so Twilio can always <Play> something."""
-    path = os.path.join("/tmp", f"response-{sid}.mp3")
-    if not os.path.exists(path):
-        return JSONResponse({"error": "No audio available"}, status_code=404)
-    return FileResponse(path, media_type="audio/mpeg")
-
-
-@app.get("/audio/response-stream")
-async def stream_audio_response(sid: str):
-    queue = _audio_streams.get(sid)
-    if queue is None:
-        return JSONResponse({"error": "No active stream"}, status_code=404)
-
-    async def iterator():
-        while True:
-            chunk = await queue.get()
-            if chunk is None:
-                break
-            yield chunk
-
-    return StreamingResponse(iterator(), media_type="audio/mpeg")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Outbound call API
@@ -403,37 +382,59 @@ async def call_lead(
     except Exception:
         pass
 
-    # Persist call configuration
+    # Persist call configuration for later turns
     _call_configs[call.sid] = {"script_id": body.script_id, "system_prompt": body.system_prompt, "turn": 0}
-    await _enqueue(
-        call.sid,
-        {"event": "initiated", "sid": call.sid, "to": body.to, "script_id": body.script_id, "system_prompt": body.system_prompt},
-    )
+    await _enqueue(call.sid, {"event": "initiated", "sid": call.sid, "to": body.to})
 
     return {"call_sid": call.sid, "status": getattr(call, "status", "queued")}
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Twilio voice webhooks (<Gather> flow) with streaming + safe fallback
+# Twilio voice webhook (hybrid: <Say> first turn, then <Play> chunked TTS)
 # ──────────────────────────────────────────────────────────────────────────────
 @app.post("/twilio-voice")
-async def twilio_voice(SpeechResult: str = Form(None), CallSid: str = Form("")):
-    _require_local_module("app.voicebot.stream_coldcall_reply", stream_coldcall_reply)
-    _require_local_module("agent.speak.stream_text_to_speech", stream_text_to_speech)
-    _require_local_module("app.backend.supabase_logger.log_conversation", log_conversation)
+async def twilio_voice(
+    SpeechResult: str = Form(None),
+    CallSid: str = Form(None),
+):
+    """
+    Hybrid, CDN-backed voice flow:
+      - First turn: <Say> (instant)
+      - Subsequent turns: chunked TTS → Supabase signed URLs → multiple <Play>
+      - Always return TwiML (never 500 to Twilio)
+    """
+    _require_local_module("app.voicebot.coldcall_lead", coldcall_lead)
 
+    base = APP_BASE_URL  # already rstrip'd above
     sid = (CallSid or "").strip()
     cfg = _call_configs.get(sid, {})
     script_id = cfg.get("script_id") or "default"
     system_prompt = cfg.get("system_prompt")
     opening_line = SCRIPTS.get(script_id, SCRIPTS["default"])["opening_line"]
 
-    if SpeechResult:
-        if not sid:
-            raise HTTPException(status_code=400, detail="Missing CallSid for streaming response")
+    def _gather_block(prompt: str = "...") -> str:
+        return f'''
+          <Gather input="speech"
+                  action="{base}/twilio-voice"
+                  method="POST"
+                  timeout="5"
+                  speechTimeout="{GATHER_SPEECH_TIMEOUT}">
+            <Say>{prompt}</Say>
+          </Gather>
+        '''
 
-        _mark_user_activity(sid)
-        await _stop_audio_stream(sid)
+    # First turn: keep it blazing fast and bulletproof
+    if not SpeechResult:
+        # Increment turn counter
+        call_state = _call_configs.setdefault(sid or "no-sid", {})
+        call_state["turn"] = int(call_state.get("turn", 0)) + 1
+        return Response(content=f"""
+<Response>
+  <Say>{opening_line}</Say>
+  {_gather_block("Are you the right person to speak with about vending services?")}
+</Response>""".strip(), media_type="application/xml")
 
+    # Subsequent turns: generate reply + chunked TTS
+    try:
         messages: list[dict[str, str]] = []
         if system_prompt:
             messages.append({"role": "system", "content": _trim_system_prompt(system_prompt)})
@@ -441,61 +442,73 @@ async def twilio_voice(SpeechResult: str = Form(None), CallSid: str = Form("")):
             messages.append({"role": "system", "content": f"Use the {script_id} script."})
         messages.append({"role": "user", "content": SpeechResult})
 
-        queue: asyncio.Queue[Optional[bytes]] = asyncio.Queue()
-        _audio_streams[sid] = queue
-        output_path = os.path.join("/tmp", f"response-{sid}.mp3")
+        reply_text = await run_in_threadpool(coldcall_lead, messages)
 
-        try:
-            task = asyncio.create_task(
-                _stream_reply_audio(
-                    sid=sid,
-                    queue=queue,
-                    messages=messages,
-                    user_input=SpeechResult,
-                    script_id=script_id,
-                    system_prompt=system_prompt,
-                    output_path=output_path,
-                )
-            )
-            _audio_stream_tasks[sid] = task
+        # If the chunker isn't importable or misconfigured, fail back to <Say>
+        if tts_chunks_to_signed_urls is None:
+            logger.warning("tts_chunker unavailable; using <Say> fallback")
+            return Response(content=f"""
+<Response>
+  <Say>{reply_text}</Say>
+  {_gather_block()}
+</Response>""".strip(), media_type="application/xml")
 
-            # Preferred streaming <Play>
-            play_url = f"{APP_BASE_URL}/audio/response-stream?sid={sid}"
+        # Chunk → synth → upload → signed URLs (tiny files, no 413/502)
+        urls = await run_in_threadpool(
+            tts_chunks_to_signed_urls, reply_text, (sid or "no_sid"), "ava", 280
+        )
+
+        # Build TwiML with multiple <Play> tags; if something went sideways, fallback to <Say>
+        if urls:
+            plays = "\n".join(f"  <Play>{u}</Play>" for u in urls)
             twiml = f"""
 <Response>
-  <Play>{play_url}</Play>
-  <Gather input="speech" action="{APP_BASE_URL}/twilio-voice" method="POST" timeout="5" speechTimeout="{GATHER_SPEECH_TIMEOUT}" partialResultCallback="{APP_BASE_URL}/twilio-partial" partialResultCallbackMethod="POST">
-    <Say>...</Say>
-  </Gather>
-</Response>"""
-
-        except Exception as e:
-            # Non-streaming fallback: Twilio still hears *our* audio, never its error line
-            logger.exception("Streaming path failed; switching to file fallback: %s", e)
-            try:
-                await run_in_threadpool(speak_text, "Got it. One moment.")  # writes /tmp/response.mp3
-            except Exception:
-                pass
-            file_url = f"{APP_BASE_URL}/audio/response-file?sid={sid}"
+{plays}
+{_gather_block()}
+</Response>""".strip()
+        else:
             twiml = f"""
 <Response>
-  <Play>{file_url}</Play>
-  <Gather input="speech" action="{APP_BASE_URL}/twilio-voice" method="POST" timeout="5" speechTimeout="{GATHER_SPEECH_TIMEOUT}">
-    <Say>Anything else?</Say>
-  </Gather>
-</Response>"""
+  <Say>{reply_text}</Say>
+  {_gather_block()}
+</Response>""".strip()
 
-    else:
-        twiml = f"""
+        # Track turn count + emit SSE event
+        call_state = _call_configs.setdefault(sid or "no-sid", {})
+        call_state["turn"] = int(call_state.get("turn", 0)) + 1
+        await _enqueue(sid or "no-sid", {"event": "reply", "sid": sid or "no-sid", "user": SpeechResult, "bot_reply": reply_text})
+
+        return Response(content=twiml, media_type="application/xml")
+
+    except Exception as e:
+        logger.exception("twilio-voice turn failed: %s", e)
+        # Never 500 to Twilio: apologize and continue the flow
+        return Response(content=f"""
 <Response>
-  <Say>{opening_line}</Say>
-  <Gather input="speech" action="{APP_BASE_URL}/twilio-voice" method="POST" timeout="5" speechTimeout="{GATHER_SPEECH_TIMEOUT}" partialResultCallback="{APP_BASE_URL}/twilio-partial" partialResultCallbackMethod="POST">
-    <Say>I'm listening...</Say>
-  </Gather>
-</Response>"""
+  <Say>Sorry, I hit a glitch. Could you say that one more time?</Say>
+  {_gather_block()}
+</Response>""".strip(), media_type="application/xml")
 
-    return Response(content=twiml.strip(), media_type="application/xml")
+# ──────────────────────────────────────────────────────────────────────────────
+# Fallback TwiML (used when primary handler fails)
+# ──────────────────────────────────────────────────────────────────────────────
+@app.post("/fallback")
+@app.get("/fallback")
+def twilio_fallback():
+    """
+    Minimal TwiML that always succeeds. Configure Twilio
+    "Primary handler fails" → /fallback (HTTP POST).
+    """
+    return Response(content="""
+<Response>
+  <Say>Sorry, we hit a snag. Please call us back, or we’ll follow up shortly.</Say>
+  <Hangup/>
+</Response>
+""".strip(), media_type="application/xml")
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Partial speech callback (lightweight, non-blocking)
+# ──────────────────────────────────────────────────────────────────────────────
 @app.post("/twilio-partial")
 async def twilio_partial(request: Request) -> Response:
     form = await request.form()
@@ -507,7 +520,6 @@ async def twilio_partial(request: Request) -> Response:
     if not sid or not transcript:
         return PlainTextResponse("ok", status_code=200)
 
-    _mark_user_activity(sid)
     await _enqueue(sid, {"event": "partial", "sid": sid, "transcript": transcript})
     return PlainTextResponse("ok", status_code=200)
 
@@ -550,8 +562,10 @@ async def status_webhook(request: Request, background_tasks: BackgroundTasks):
         background_tasks=background_tasks,
     )
 
+    # If ended, clear volatile state
     if call_status in {"completed", "failed", "busy", "no-answer", "canceled"}:
-        await _close_stream(sid)
+        _event_queues.pop(sid, None)
+        _call_configs.pop(sid, None)
 
     return PlainTextResponse("ok", status_code=200)
 
@@ -574,13 +588,10 @@ async def call_end(sid: str, client: TwilioClient = Depends(twilio_client)):
     return {"sid": call.sid, "status": call.status}
 
 # ──────────────────────────────────────────────────────────────────────────────
-# SSE (per-call) with heartbeat to ride through proxies
+# SSE (per-call) for dashboards
 # ──────────────────────────────────────────────────────────────────────────────
 _call_configs: Dict[str, Dict[str, Optional[str]]] = {}
 _event_queues: Dict[str, asyncio.Queue[str]] = {}
-_audio_streams: Dict[str, asyncio.Queue[Optional[bytes]]] = {}
-_audio_stream_tasks: Dict[str, asyncio.Task] = {}
-_user_activity_events: Dict[str, asyncio.Event] = {}
 
 async def _enqueue(sid: str, payload: dict) -> None:
     q = _event_queues.get(sid)
@@ -589,192 +600,10 @@ async def _enqueue(sid: str, payload: dict) -> None:
         _event_queues[sid] = q
     await q.put(json.dumps(payload))
 
-async def _close_stream(sid: str) -> None:
-    q = _event_queues.get(sid)
-    if q:
-        await q.put("[DONE]")
-    _event_queues.pop(sid, None)
-    _call_configs.pop(sid, None)
-    _user_activity_events.pop(sid, None)
-    await _stop_audio_stream(sid)
-
-def _mark_user_activity(sid: str) -> None:
-    event = _user_activity_events.get(sid)
-    if event is not None:
-        event.set()
-
-def _prepare_for_next_user_activity(sid: str) -> asyncio.Event:
-    event = asyncio.Event()
-    _user_activity_events[sid] = event
-    return event
-
-async def _stop_audio_stream(sid: str) -> None:
-    queue = _audio_streams.pop(sid, None)
-    if queue is not None:
-        await queue.put(None)
-    task = _audio_stream_tasks.pop(sid, None)
-    if task is not None:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-
-async def _stream_reply_audio(
-    *,
-    sid: str,
-    queue: asyncio.Queue[Optional[bytes]],
-    messages: list[dict[str, str]],
-    user_input: str,
-    script_id: str,
-    system_prompt: Optional[str],
-    output_path: str,
-) -> None:
-    _require_local_module("app.voicebot.stream_coldcall_reply", stream_coldcall_reply)
-    _require_local_module("agent.speak.stream_text_to_speech", stream_text_to_speech)
-    _require_local_module("app.backend.supabase_logger.log_conversation", log_conversation)
-
-    append = False
-    parts: list[str] = []
-    first_chunk_event = asyncio.Event()
-    write_lock = asyncio.Lock()
-
-    call_state = _call_configs.setdefault(sid, {})
-    turn = int(call_state.get("turn", 0)) + 1
-    call_state["turn"] = turn
-    is_first_turn = turn == 1
-
-    async def _emit_backchannel() -> None:
-        nonlocal append
-        try:
-            await asyncio.sleep(BACKCHANNEL_DELAY_MS / 1000.0)
-            if first_chunk_event.is_set():
-                return
-            await _enqueue(sid, {"event": "backchannel", "sid": sid, "detail": BACKCHANNEL_TEXT})
-            async with write_lock:
-                wrote_audio = False
-                async for audio_chunk in stream_text_to_speech(  # type: ignore[misc]
-                    BACKCHANNEL_TEXT, output_path=output_path, append=append
-                ):
-                    if first_chunk_event.is_set():
-                        break
-                    wrote_audio = True
-                    await queue.put(audio_chunk)
-                if wrote_audio:
-                    append = True
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.warning("Backchannel generation failed for %s", sid, exc_info=True)
-
-    backchannel_task = asyncio.create_task(_emit_backchannel())
-
-    try:
-        async for chunk in stream_coldcall_reply(messages, is_first_turn=is_first_turn):  # type: ignore[misc]
-            text = (chunk or "").strip()
-            if not text:
-                continue
-
-            parts.append(text)
-            first_chunk_event.set()
-
-            async with write_lock:
-                wrote_audio = False
-                async for audio_chunk in stream_text_to_speech(  # type: ignore[misc]
-                    text, output_path=output_path, append=append
-                ):
-                    wrote_audio = True
-                    await queue.put(audio_chunk)
-                if wrote_audio:
-                    append = True
-
-        final_text = " ".join(parts).strip()
-        if final_text:
-            await _enqueue(
-                sid,
-                {
-                    "event": "reply",
-                    "sid": sid,
-                    "user": user_input,
-                    "bot_reply": final_text,
-                    "script_id": script_id,
-                    "system_prompt": system_prompt,
-                },
-            )
-            with contextlib.suppress(Exception):
-                await log_conversation(  # type: ignore[misc]
-                    ConversationLog(user_input=user_input, bot_reply=final_text)  # type: ignore[misc]
-                )
-
-        next_activity_event = _prepare_for_next_user_activity(sid)
-
-        async def _stream_continuation() -> None:
-            nonlocal append
-            continuation_messages = list(messages) + [{"role": "assistant", "content": final_text}]
-            continuation_parts: list[str] = []
-
-            async for chunk in stream_coldcall_reply(  # type: ignore[misc]
-                continuation_messages, is_first_turn=False
-            ):
-                if next_activity_event.is_set():
-                    return
-                text = (chunk or "").strip()
-                if not text:
-                    continue
-                continuation_parts.append(text)
-                async with write_lock:
-                    wrote_audio = False
-                    async for audio_chunk in stream_text_to_speech(  # type: ignore[misc]
-                        text, output_path=output_path, append=append
-                    ):
-                        if next_activity_event.is_set():
-                            break
-                        wrote_audio = True
-                        await queue.put(audio_chunk)
-                    if wrote_audio:
-                        append = True
-
-            follow_up = " ".join(continuation_parts).strip()
-            if follow_up and not next_activity_event.is_set():
-                await _enqueue(sid, {"event": "continuation", "sid": sid, "bot_reply": follow_up})
-                with contextlib.suppress(Exception):
-                    await log_conversation(  # type: ignore[misc]
-                        ConversationLog(user_input="[silence continuation]", bot_reply=follow_up)  # type: ignore[misc]
-                    )
-
-        if is_first_turn and final_text and CONTINUATION_SILENCE_SECONDS > 0:
-            try:
-                await asyncio.wait_for(next_activity_event.wait(), timeout=CONTINUATION_SILENCE_SECONDS)
-            except asyncio.TimeoutError:
-                await _stream_continuation()
-
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        await _enqueue(sid, {"event": "error", "sid": sid, "detail": f"Streaming pipeline failed: {exc}"})
-    finally:
-        if not backchannel_task.done():
-            backchannel_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await backchannel_task
-
-        await queue.put(None)
-        if _audio_streams.get(sid) is queue:
-            _audio_streams.pop(sid, None)
-        current = asyncio.current_task()
-        if current is not None and _audio_stream_tasks.get(sid) is current:
-            _audio_stream_tasks.pop(sid, None)
-
-# ──────────────────────────────────────────────────────────────────────────────
-# MCP SSE (protected)
-# ──────────────────────────────────────────────────────────────────────────────
 @app.get("/mcp/sse", dependencies=[Depends(_mcp_guard)])
 @app.get("/sse")
 async def sse(
     sid: Optional[str] = None,
-    lead_name: Optional[str] = None,
-    phone: Optional[str] = None,
-    property_type: Optional[str] = None,
-    location_area: Optional[str] = None,
-    callback_offer: Optional[str] = None,
 ):
     # If we have a real call stream, bridge it out
     if sid:
@@ -826,14 +655,16 @@ async def sse(
 # ──────────────────────────────────────────────────────────────────────────────
 # Error shaping
 # ──────────────────────────────────────────────────────────────────────────────
+from fastapi.responses import JSONResponse as _JSONResponse  # alias to avoid confusion
+
 @app.exception_handler(HTTPException)
 async def http_exc_handler(_: Request, exc: HTTPException):
-    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    return _JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 @app.exception_handler(Exception)
 async def unhandled_exc_handler(_: Request, exc: Exception):
     logger.exception("Unhandled error")
-    return JSONResponse(status_code=500, content={"detail": f"Internal error: {exc}"})
+    return _JSONResponse(status_code=500, content={"detail": f"Internal error: {exc}"})
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Entrypoint (local dev)
