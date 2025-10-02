@@ -1,26 +1,30 @@
-# fly.ui.toml — example if you host UI on Fly too
 app = "trifivend-ui"
 primary_region = "sjc"
 
 [build]
-  dockerfile = "Dockerfile" # or use a separate UI Dockerfile in /ui
+  dockerfile = "Dockerfile"
+  [build.args]
+    REQS = "/tmp/requirements.ui.txt"
+
+[processes]
+  ui = "python -m streamlit run ui/streamlit_app.py --server.address 0.0.0.0 --server.port 8501"
 
 [[services]]
-  internal_port = 3000
   protocol = "tcp"
+  internal_port = 8501
+  processes = ["ui"]
 
   [[services.ports]]
     handlers = ["http"]
     port = 80
-
   [[services.ports]]
-    handlers = ["tls", "http"]
+    handlers = ["tls","http"]
     port = 443
 
 [[checks]]
   type = "http"
   name = "ui-health"
-  port = 3000
+  port = 8501
   interval = "5s"
   timeout = "2s"
   grace_period = "30s"
