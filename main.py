@@ -10,6 +10,7 @@ import re
 import shutil
 import tempfile
 from typing import Any, Awaitable, Callable, Dict, Optional
+from collections.abc import AsyncGenerator
 
 from dotenv import load_dotenv
 from fastapi import (
@@ -593,6 +594,39 @@ async def call_end(sid: str, client: TwilioClient = Depends(twilio_client)):
 _call_configs: Dict[str, Dict[str, Optional[str]]] = {}
 _event_queues: Dict[str, asyncio.Queue[str]] = {}
 
+
+async def _sse_event_stream(
+    queue: asyncio.Queue[str],
+    *,
+    heartbeat_interval: float = 20.0,
+) -> AsyncGenerator[Dict[str, str], None]:
+    queue_task: asyncio.Task[str] | None = None
+    try:
+        while True:
+            if queue_task is None:
+                queue_task = asyncio.create_task(queue.get())
+
+            try:
+                message = await asyncio.wait_for(
+                    asyncio.shield(queue_task),
+                    timeout=heartbeat_interval,
+                )
+            except asyncio.TimeoutError:
+                yield {"event": "ping", "data": "{}"}
+                continue
+
+            queue_task = None
+            if message == "[DONE]":
+                yield {"event": "done", "data": "{}"}
+                break
+
+            yield {"event": "message", "data": message}
+    finally:
+        if queue_task is not None:
+            queue_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await queue_task
+
 async def _enqueue(sid: str, payload: dict) -> None:
     q = _event_queues.get(sid)
     if q is None:
@@ -609,28 +643,7 @@ async def sse(
     if sid:
         q = _event_queues.setdefault(sid, asyncio.Queue())
 
-        async def gen():
-            async def heartbeat():
-                while True:
-                    await asyncio.sleep(20)
-                    yield {"event": "ping", "data": "{}"}
-
-            hb = heartbeat()
-            while True:
-                msg_task = asyncio.create_task(q.get())
-                hb_task = asyncio.create_task(hb.__anext__())
-                done, _ = await asyncio.wait({msg_task, hb_task}, return_when=asyncio.FIRST_COMPLETED)
-
-                if msg_task in done:
-                    msg = msg_task.result()
-                    if msg == "[DONE]":
-                        yield {"event": "done", "data": "{}"}
-                        break
-                    yield {"event": "message", "data": msg}
-                else:
-                    yield hb_task.result()
-
-        return EventSourceResponse(gen())
+        return EventSourceResponse(_sse_event_stream(q))
 
     # Otherwise, demo OpenAI streamed completion if available
     if openai_client:
