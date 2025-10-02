@@ -30,6 +30,11 @@ async def test_transcribe_concurrent(monkeypatch):
         return None
 
     monkeypatch.setattr(main, "log_conversation", fake_log_conversation)
+    monkeypatch.setattr(
+        main,
+        "ConversationLog",
+        lambda *args, **kwargs: SimpleNamespace(*args, **kwargs),
+    )
 
     transport = ASGITransport(app=main.app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -54,9 +59,13 @@ async def test_sse_concurrent(monkeypatch):
 
         return gen()
 
-    monkeypatch.setattr(
-        main.openai_client.chat.completions, "create", fake_create
-    )
+    if main.openai_client is None:
+        main.openai_client = SimpleNamespace()
+    if getattr(main.openai_client, "chat", None) is None:
+        main.openai_client.chat = SimpleNamespace()  # type: ignore[attr-defined]
+    if getattr(main.openai_client.chat, "completions", None) is None:
+        main.openai_client.chat.completions = SimpleNamespace()  # type: ignore[attr-defined]
+    main.openai_client.chat.completions.create = fake_create  # type: ignore[attr-defined]
     async def fake_log_conversation(*_args, **_kwargs):
         return None
 
@@ -80,4 +89,24 @@ async def test_sse_concurrent(monkeypatch):
         start = time.perf_counter()
         await asyncio.gather(get(), get())
         assert time.perf_counter() - start < 0.45
+
+
+@pytest.mark.asyncio
+async def test_sse_generator_single_waiter_during_heartbeats():
+    queue: asyncio.Queue[str] = asyncio.Queue()
+    gen = main._sse_event_stream(queue, heartbeat_interval=0.01)
+
+    try:
+        for _ in range(3):
+            event = await asyncio.wait_for(anext(gen), timeout=1)
+            assert event == {"event": "ping", "data": "{}"}
+            getters = getattr(queue, "_getters", [])
+            assert len(getters) == 1
+
+        await queue.put("[DONE]")
+        done_event = await asyncio.wait_for(anext(gen), timeout=1)
+        assert done_event == {"event": "done", "data": "{}"}
+        assert not getattr(queue, "_getters", [])
+    finally:
+        await gen.aclose()
 
