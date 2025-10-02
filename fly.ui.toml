@@ -4,7 +4,7 @@ primary_region = "sjc"
 [build]
   dockerfile = "Dockerfile"
   [build.args]
-    REQS = "/tmp/requirements.ui.txt"
+    REQS = "/tmp/requirements.ui.txt" # <-- installs Streamlit
 
 [processes]
   ui = "python -m streamlit run ui/streamlit_app.py --server.address 0.0.0.0 --server.port 8501"
@@ -13,7 +13,6 @@ primary_region = "sjc"
   protocol = "tcp"
   internal_port = 8501
   processes = ["ui"]
-
   [[services.ports]]
     handlers = ["http"]
     port = 80
