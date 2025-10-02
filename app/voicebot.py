@@ -26,6 +26,16 @@ if not is_openai_available():  # pragma: no cover - exercised when dependency mi
         missing_openai_error(),
     )
 
+
+def _require_async_client() -> None:
+    """Ensure the OpenAI async client is available before issuing requests."""
+
+    if async_client is None:
+        raise RuntimeError(
+            "OpenAI async client unavailable. Install the OpenAI SDK and configure "
+            f"OPENAI_API_KEY. Details: {missing_openai_error()}"
+        )
+
 # Lower thresholds for faster first audio
 _SENTENCE_DELIMITERS = (".", "?", "!", "\n")
 _MIN_FLUSH_CHARS = 60     # ~1 short clause
@@ -49,6 +59,8 @@ async def stream_coldcall_reply(
     Tokens are buffered until a likely sentence boundary (or a safety length),
     then flushed to the caller. Keeps UX snappy for TTS/voice and chat UIs.
     """
+    _require_async_client()
+
     buffer = ""
 
     params = {
@@ -124,6 +136,8 @@ def coldcall_lead(
     If you're inside an event loop (e.g., FastAPI/UVicorn request context),
     call `stream_coldcall_reply` directly instead of this helper.
     """
+    _require_async_client()
+
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
