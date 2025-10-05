@@ -1,31 +1,33 @@
+# fly.ui.toml — Streamlit UI (Machines / Apps V2)
 app = "trifivend-ui"
 primary_region = "sjc"
 
 [build]
   dockerfile = "Dockerfile"
   [build.args]
-    REQS = "/tmp/requirements.ui.txt" # <-- installs Streamlit
+    REQS = "/tmp/requirements.ui.txt"   # installs Streamlit, requests, etc.
+
+[env]
+  PORT = "8080"
+  # Private mesh call to the backend (IPv6 fdaa::); works once API binds to ::.
+  BACKEND_URL = "http://ai-callbot.internal:8080"
+
+[http_service]
+  internal_port = 8080                  # must match Streamlit --server.port
+  force_https = true
+  auto_start_machines = true
+  auto_stop_machines = false
+  min_machines_running = 1
+  processes = ["web"]
+
+  [[http_service.checks]]
+    name = "ui-health"
+    method = "GET"
+    path = "/"
+    interval = "5s"
+    timeout = "2s"
+    grace_period = "60s"
 
 [processes]
-  ui = "python -m streamlit run ui/streamlit_app.py --server.address 0.0.0.0 --server.port 8501"
-
-[[services]]
-  protocol = "tcp"
-  internal_port = 8501
-  processes = ["ui"]
-  [[services.ports]]
-    handlers = ["http"]
-    port = 80
-  [[services.ports]]
-    handlers = ["tls","http"]
-    port = 443
-
-[[checks]]
-  type = "http"
-  name = "ui-health"
-  port = 8501
-  interval = "5s"
-  timeout = "2s"
-  grace_period = "30s"
-  method = "get"
-  path = "/"
+  # Bind to 0.0.0.0 and $PORT so Fly can reach it internally
+  web = "python -m streamlit run ui/streamlit_app.py --server.address 0.0.0.0 --server.port $PORT"

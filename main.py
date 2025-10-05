@@ -26,19 +26,14 @@ from fastapi import (
 )
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import (
-    FileResponse,
-    JSONResponse,
-    PlainTextResponse,
-    Response,
-)
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel, Field
 from pydantic import AliasChoices, ConfigDict, field_validator  # Pydantic v2
 from sse_starlette.sse import EventSourceResponse
 from twilio.rest import Client as TwilioClient
 
 # ──────────────────────────────────────────────────────────────────────────────
-# App bootstrap & configuration
+# Bootstrap & config
 # ──────────────────────────────────────────────────────────────────────────────
 
 load_dotenv()
@@ -52,11 +47,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("trifivend.api")
 
-ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+ENVIRONMENT = (os.getenv("ENVIRONMENT") or "development").lower()
+FRONTEND_URL = (os.getenv("FRONTEND_URL") or "http://localhost:3000").strip()
 
 # Public base of THIS backend (Twilio requires absolute HTTPS URLs)
-APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8080").rstrip("/")
+APP_BASE_URL = (os.getenv("APP_BASE_URL") or "https://ai-callbot.fly.dev").rstrip("/")
 
 # Twilio config
 TWILIO_ACCOUNT_SID = (os.getenv("TWILIO_ACCOUNT_SID") or "").strip()
@@ -65,7 +60,7 @@ TWILIO_AUTH_TOKEN = (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
 TWILIO_NUMBER = (os.getenv("TWILLO_NUMBER") or os.getenv("TWILIO_NUMBER") or "").strip()
 
 # Voice flow tuning
-GATHER_SPEECH_TIMEOUT = os.getenv("GATHER_SPEECH_TIMEOUT", "0.3")  # Twilio expects string/number
+GATHER_SPEECH_TIMEOUT = os.getenv("GATHER_SPEECH_TIMEOUT", "0.3")  # Twilio expects str/number
 SYSTEM_PROMPT_TOKEN_LIMIT = int(os.getenv("SYSTEM_PROMPT_TOKEN_LIMIT", "300"))
 
 # Simple script registry (extend as needed)
@@ -78,7 +73,7 @@ SCRIPTS: Dict[str, Dict[str, str]] = {
     }
 }
 
-# OpenAI helper (optional-safe)
+# Optional OpenAI compatibility layer (always lazy/fault-tolerant)
 try:
     from app.openai_compat import (
         create_async_openai_client,
@@ -187,7 +182,7 @@ def twilio_client() -> TwilioClient:
     return TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# FastAPI app & CORS
+# App & middleware
 # ──────────────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Trifivend Backend", version="1.2.0")
 
@@ -199,16 +194,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Mount Twilio router (modular, absolute URLs, never 500 to Twilio)
+try:
+    from twilio_utils.webhook_handler import router as twilio_router
+    app.include_router(twilio_router)  # or: prefix="/twilio"
+    logger.info("Mounted Twilio webhook router")
+except Exception as e:  # keep the app up even if router import fails
+    logger.warning("Twilio router not mounted: %s", e)
+
 # ──────────────────────────────────────────────────────────────────────────────
-# MCP shared-secret guard (protect all /mcp/* routes)
+# MCP shared-secret guard (protect /mcp/* routes)
 # ──────────────────────────────────────────────────────────────────────────────
-def _mcp_guard(secret: str = Header(None)) -> None:
+def _mcp_guard(mcp_secret: str = Header(None, alias="MCP-Secret")) -> None:
     expected = os.getenv("MCP_SHARED_SECRET", "")
     if not expected:
-        # if guard not configured, allow but warn
-        logger.warning("MCP_SECRET not set; /mcp/* endpoints are unprotected")
+        logger.warning("MCP_SHARED_SECRET not set; /mcp/* endpoints are unprotected")
         return
-    if secret != expected:
+    if mcp_secret != expected:
         raise HTTPException(status_code=403, detail="Forbidden")
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -254,7 +256,7 @@ class HealthOut(BaseModel):
     app_base_url: str
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Health
+# Health & root
 # ──────────────────────────────────────────────────────────────────────────────
 @app.get("/health", response_model=HealthOut)
 def health() -> HealthOut:
@@ -263,6 +265,11 @@ def health() -> HealthOut:
         twilio_configured=bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_NUMBER),
         app_base_url=APP_BASE_URL,
     )
+
+
+@app.get("/")
+def root():
+    return {"service": "ai-callbot", "health": "/health", "docs": "/docs"}
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Audio transcription → reply → speech → log (non-call path)
@@ -313,7 +320,7 @@ async def transcribe(
             os.remove(tmp_path)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Audio endpoints (legacy dev: serve last /tmp file)
+# Audio endpoint (serves the last synthesized response)
 # ──────────────────────────────────────────────────────────────────────────────
 @app.get("/audio/response.mp3")
 async def serve_audio():
@@ -390,22 +397,17 @@ async def call_lead(
     return {"call_sid": call.sid, "status": getattr(call, "status", "queued")}
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Twilio voice webhook (hybrid: <Say> first turn, then <Play> chunked TTS)
+# Twilio voice webhook (legacy fallback if router is not mounted)
+# NOTE: Preferred implementation lives in twilio_utils/webhook_handler.py
 # ──────────────────────────────────────────────────────────────────────────────
 @app.post("/twilio-voice")
-async def twilio_voice(
+async def twilio_voice_legacy(
     SpeechResult: str = Form(None),
     CallSid: str = Form(None),
 ):
-    """
-    Hybrid, CDN-backed voice flow:
-      - First turn: <Say> (instant)
-      - Subsequent turns: chunked TTS → Supabase signed URLs → multiple <Play>
-      - Always return TwiML (never 500 to Twilio)
-    """
     _require_local_module("app.voicebot.coldcall_lead", coldcall_lead)
 
-    base = APP_BASE_URL  # already rstrip'd above
+    base = APP_BASE_URL
     sid = (CallSid or "").strip()
     cfg = _call_configs.get(sid, {})
     script_id = cfg.get("script_id") or "default"
@@ -413,7 +415,7 @@ async def twilio_voice(
     opening_line = SCRIPTS.get(script_id, SCRIPTS["default"])["opening_line"]
 
     def _gather_block(prompt: str = "...") -> str:
-        return f'''
+        return f"""
           <Gather input="speech"
                   action="{base}/twilio-voice"
                   method="POST"
@@ -421,20 +423,20 @@ async def twilio_voice(
                   speechTimeout="{GATHER_SPEECH_TIMEOUT}">
             <Say>{prompt}</Say>
           </Gather>
-        '''
+        """.strip()
 
-    # First turn: keep it blazing fast and bulletproof
     if not SpeechResult:
-        # Increment turn counter
         call_state = _call_configs.setdefault(sid or "no-sid", {})
         call_state["turn"] = int(call_state.get("turn", 0)) + 1
-        return Response(content=f"""
+        return Response(
+            content=f"""
 <Response>
   <Say>{opening_line}</Say>
   {_gather_block("Are you the right person to speak with about vending services?")}
-</Response>""".strip(), media_type="application/xml")
+</Response>""".strip(),
+            media_type="application/xml",
+        )
 
-    # Subsequent turns: generate reply + chunked TTS
     try:
         messages: list[dict[str, str]] = []
         if system_prompt:
@@ -445,21 +447,21 @@ async def twilio_voice(
 
         reply_text = await run_in_threadpool(coldcall_lead, messages)
 
-        # If the chunker isn't importable or misconfigured, fail back to <Say>
         if tts_chunks_to_signed_urls is None:
             logger.warning("tts_chunker unavailable; using <Say> fallback")
-            return Response(content=f"""
+            return Response(
+                content=f"""
 <Response>
   <Say>{reply_text}</Say>
   {_gather_block()}
-</Response>""".strip(), media_type="application/xml")
+</Response>""".strip(),
+                media_type="application/xml",
+            )
 
-        # Chunk → synth → upload → signed URLs (tiny files, no 413/502)
         urls = await run_in_threadpool(
             tts_chunks_to_signed_urls, reply_text, (sid or "no_sid"), "ava", 280
         )
 
-        # Build TwiML with multiple <Play> tags; if something went sideways, fallback to <Say>
         if urls:
             plays = "\n".join(f"  <Play>{u}</Play>" for u in urls)
             twiml = f"""
@@ -474,7 +476,6 @@ async def twilio_voice(
   {_gather_block()}
 </Response>""".strip()
 
-        # Track turn count + emit SSE event
         call_state = _call_configs.setdefault(sid or "no-sid", {})
         call_state["turn"] = int(call_state.get("turn", 0)) + 1
         await _enqueue(sid or "no-sid", {"event": "reply", "sid": sid or "no-sid", "user": SpeechResult, "bot_reply": reply_text})
@@ -483,12 +484,14 @@ async def twilio_voice(
 
     except Exception as e:
         logger.exception("twilio-voice turn failed: %s", e)
-        # Never 500 to Twilio: apologize and continue the flow
-        return Response(content=f"""
+        return Response(
+            content=f"""
 <Response>
   <Say>Sorry, I hit a glitch. Could you say that one more time?</Say>
   {_gather_block()}
-</Response>""".strip(), media_type="application/xml")
+</Response>""".strip(),
+            media_type="application/xml",
+        )
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Fallback TwiML (used when primary handler fails)
@@ -496,16 +499,15 @@ async def twilio_voice(
 @app.post("/fallback")
 @app.get("/fallback")
 def twilio_fallback():
-    """
-    Minimal TwiML that always succeeds. Configure Twilio
-    "Primary handler fails" → /fallback (HTTP POST).
-    """
-    return Response(content="""
+    return Response(
+        content="""
 <Response>
   <Say>Sorry, we hit a snag. Please call us back, or we’ll follow up shortly.</Say>
   <Hangup/>
 </Response>
-""".strip(), media_type="application/xml")
+""".strip(),
+        media_type="application/xml",
+    )
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Partial speech callback (lightweight, non-blocking)
@@ -514,9 +516,7 @@ def twilio_fallback():
 async def twilio_partial(request: Request) -> Response:
     form = await request.form()
     sid = (form.get("CallSid") or "").strip()
-    transcript = (
-        form.get("UnstableSpeechResult") or form.get("SpeechResult") or ""
-    ).strip()
+    transcript = (form.get("UnstableSpeechResult") or form.get("SpeechResult") or "").strip()
 
     if not sid or not transcript:
         return PlainTextResponse("ok", status_code=200)
@@ -542,7 +542,13 @@ async def status_webhook(request: Request, background_tasks: BackgroundTasks):
     cfg = _call_configs.get(sid, {})
     await _enqueue(
         sid,
-        {"event": "status", "sid": sid, "status": call_status, "script_id": cfg.get("script_id"), "system_prompt": cfg.get("system_prompt")},
+        {
+            "event": "status",
+            "sid": sid,
+            "status": call_status,
+            "script_id": cfg.get("script_id"),
+            "system_prompt": cfg.get("system_prompt"),
+        },
     )
 
     # Log raw status + payload (non-blocking)
@@ -558,7 +564,9 @@ async def status_webhook(request: Request, background_tasks: BackgroundTasks):
     )
     _schedule_background_coroutine(
         log_conversation,  # type: ignore[misc]
-        ConversationLog(user_input="[status update]", bot_reply=call_status or "(unknown)", meta={"call_sid": sid, "payload": payload}),
+        ConversationLog(
+            user_input="[status update]", bot_reply=call_status or "(unknown)", meta={"call_sid": sid, "payload": payload}
+        ),
         description="status log",
         background_tasks=background_tasks,
     )
@@ -569,24 +577,6 @@ async def status_webhook(request: Request, background_tasks: BackgroundTasks):
         _call_configs.pop(sid, None)
 
     return PlainTextResponse("ok", status_code=200)
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Call management helpers
-# ──────────────────────────────────────────────────────────────────────────────
-@app.get("/call/{sid}")
-async def call_status(sid: str, client: TwilioClient = Depends(twilio_client)):
-    call = await run_in_threadpool(client.calls(sid).fetch)
-    return {"sid": call.sid, "status": call.status}
-
-@app.post("/call/{sid}/cancel")
-async def call_cancel(sid: str, client: TwilioClient = Depends(twilio_client)):
-    call = await run_in_threadpool(client.calls(sid).update, status="canceled")
-    return {"sid": call.sid, "status": call.status}
-
-@app.post("/call/{sid}/end")
-async def call_end(sid: str, client: TwilioClient = Depends(twilio_client)):
-    call = await run_in_threadpool(client.calls(sid).update, status="completed")
-    return {"sid": call.sid, "status": call.status}
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SSE (per-call) for dashboards
@@ -600,6 +590,13 @@ async def _sse_event_stream(
     *,
     heartbeat_interval: float = 20.0,
 ) -> AsyncGenerator[Dict[str, str], None]:
+    """
+    Robust SSE generator:
+      - emits {"event":"ping","data":"{}"} every heartbeat_interval
+      - drains messages from the queue
+      - emits {"event":"done"} when "[DONE]" is seen
+      - cleans up any pending queue get on exit
+    """
     queue_task: asyncio.Task[str] | None = None
     try:
         while True:
@@ -627,6 +624,7 @@ async def _sse_event_stream(
             with contextlib.suppress(asyncio.CancelledError):
                 await queue_task
 
+
 async def _enqueue(sid: str, payload: dict) -> None:
     q = _event_queues.get(sid)
     if q is None:
@@ -634,15 +632,13 @@ async def _enqueue(sid: str, payload: dict) -> None:
         _event_queues[sid] = q
     await q.put(json.dumps(payload))
 
+
 @app.get("/mcp/sse", dependencies=[Depends(_mcp_guard)])
 @app.get("/sse")
-async def sse(
-    sid: Optional[str] = None,
-):
+async def sse(sid: Optional[str] = None):
     # If we have a real call stream, bridge it out
     if sid:
         q = _event_queues.setdefault(sid, asyncio.Queue())
-
         return EventSourceResponse(_sse_event_stream(q))
 
     # Otherwise, demo OpenAI streamed completion if available
@@ -670,23 +666,27 @@ async def sse(
 # ──────────────────────────────────────────────────────────────────────────────
 from fastapi.responses import JSONResponse as _JSONResponse  # alias to avoid confusion
 
+
 @app.exception_handler(HTTPException)
 async def http_exc_handler(_: Request, exc: HTTPException):
     return _JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
 
 @app.exception_handler(Exception)
 async def unhandled_exc_handler(_: Request, exc: Exception):
     logger.exception("Unhandled error")
     return _JSONResponse(status_code=500, content={"detail": f"Internal error: {exc}"})
 
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Entrypoint (local dev)
+# Local dev entrypoint (match Fly: dual-stack)
 # ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(
         "main:app",
-        host="0.0.0.0",
+        host="::",  # dual-stack like production (Fly uses IPv6-first)
         port=int(os.getenv("PORT", "8080")),
         reload=False,
         log_level=os.getenv("LOG_LEVEL", "info"),
