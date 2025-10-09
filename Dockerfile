@@ -1,23 +1,20 @@
-# Use a slim base image
-FROM python:3.13-slim as base
+# Dockerfile — TriFiVend (backend + UI)
+FROM python:3.12-slim AS base
 
-# Set environment variables
 ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
     PORT=8080
 
-# Install dependencies
-WORKDIR /app
-COPY pyproject.toml poetry.lock* /app/
-RUN pip install --upgrade pip \
-    && pip install poetry \
-    && poetry config virtualenvs.create false \
-    && poetry install --no-dev
 
-# Copy source
+# --- deps ---
+WORKDIR /app
+COPY requirements.backend.txt /tmp/requirements.txt
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install -r /tmp/requirements.txt
+
+# copy the app
 COPY . /app
 
-# Exposure
+# expose + start
 EXPOSE 8080
-
-ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["uvicorn", "main:app", "--host", "::", "--port", "8080"]

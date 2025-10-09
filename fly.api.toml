@@ -1,13 +1,49 @@
+# fly.api.toml — ai-callbot backend
+app = "ai-callbot"
+primary_region = "sjc"
+
+[env]
+  ENVIRONMENT = "production"
+  LOG_LEVEL = "info"
+  PORT = "8080"
+  APP_BASE_URL = "https://ai-callbot.fly.dev"
+  FRONTEND_URL = "https://trifivend-ui.fly.dev"
+
+# ──────────────────────────────────────────────────────────────
+# Machines (Apps V2) HTTP service definition
+# ──────────────────────────────────────────────────────────────
 [http_service]
   internal_port = 8080
+  force_https = true
   auto_start_machines = true
   auto_stop_machines = false
   min_machines_running = 1
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 50
+    hard_limit = 100
 
   [[http_service.checks]]
     name = "api-health"
     method = "GET"
     path = "/health"
     interval = "5s"
-    timeout = "2s"
-    grace_period = "60s"
+    timeout  = "2s"
+    grace_period = "30s"
+    protocol = "http"
+
+# ──────────────────────────────────────────────────────────────
+# Optional metadata for clarity
+# ──────────────────────────────────────────────────────────────
+[metadata]
+  description = "Trifivend FastAPI backend for Twilio + OpenAI + Supabase voice automation"
+  fly_platform = "machines"
+
+# ──────────────────────────────────────────────────────────────
+# Scaling hints (uncomment if needed)
+# ──────────────────────────────────────────────────────────────
+# [metrics]
+#   port = 8080
+#   path = "/metrics"

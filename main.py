@@ -1,4 +1,18 @@
 # main.py
+# ──────────────────────────────────────────────────────────────────────────────
+# Trifivend FastAPI backend:
+# - Twilio webhooks live in twilio_utils/webhook_handler.py (authoritative)
+# - Optional WS voice agent in agent/ws_voice_agent.py
+# - /call kicks off outbound calls (Twilio client)
+# - /transcribe -> STT -> reply -> TTS (non-call path)
+# - SSE for live dashboards
+# - Health is shallow & deterministic
+# Production notes:
+#   • Run with: uvicorn main:app --host :: --port 8080
+#   • Fly Machines internal_port must match 8080
+#   • APP_BASE_URL must be public (Twilio)
+# ──────────────────────────────────────────────────────────────────────────────
+
 from __future__ import annotations
 
 import asyncio
@@ -9,8 +23,8 @@ import os
 import re
 import shutil
 import tempfile
-from typing import Any, Awaitable, Callable, Dict, Optional
 from collections.abc import AsyncGenerator
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from dotenv import load_dotenv
 from fastapi import (
@@ -27,8 +41,7 @@ from fastapi import (
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
-from pydantic import BaseModel, Field
-from pydantic import AliasChoices, ConfigDict, field_validator  # Pydantic v2
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 from sse_starlette.sse import EventSourceResponse
 from twilio.rest import Client as TwilioClient
 
@@ -38,42 +51,25 @@ from twilio.rest import Client as TwilioClient
 
 load_dotenv()
 
-LOG_LEVEL_NAME = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_LEVEL_NAME = (os.getenv("LOG_LEVEL") or "INFO").upper()
 LOG_LEVEL = getattr(logging, LOG_LEVEL_NAME, logging.INFO)
-
-logging.basicConfig(
-    level=LOG_LEVEL,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("trifivend.api")
 
 ENVIRONMENT = (os.getenv("ENVIRONMENT") or "development").lower()
 FRONTEND_URL = (os.getenv("FRONTEND_URL") or "http://localhost:3000").strip()
-
-# Public base of THIS backend (Twilio requires absolute HTTPS URLs)
-APP_BASE_URL = (os.getenv("APP_BASE_URL") or "https://ai-callbot.fly.dev").rstrip("/")
+APP_BASE_URL = (os.getenv("APP_BASE_URL") or "https://ai-callbot.fly.dev").rstrip("/")  # Twilio needs public HTTPS
 
 # Twilio config
 TWILIO_ACCOUNT_SID = (os.getenv("TWILIO_ACCOUNT_SID") or "").strip()
 TWILIO_AUTH_TOKEN = (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
-# tolerate occasional typo TWILLO_NUMBER
-TWILIO_NUMBER = (os.getenv("TWILLO_NUMBER") or os.getenv("TWILIO_NUMBER") or "").strip()
+TWILIO_NUMBER = (os.getenv("TWILIO_NUMBER") or os.getenv("TWILLO_NUMBER") or "").strip()  # tolerate typo
 
 # Voice flow tuning
-GATHER_SPEECH_TIMEOUT = os.getenv("GATHER_SPEECH_TIMEOUT", "0.3")  # Twilio expects str/number
+GATHER_SPEECH_TIMEOUT = os.getenv("GATHER_SPEECH_TIMEOUT", "0.3")
 SYSTEM_PROMPT_TOKEN_LIMIT = int(os.getenv("SYSTEM_PROMPT_TOKEN_LIMIT", "300"))
 
-# Simple script registry (extend as needed)
-SCRIPTS: Dict[str, Dict[str, str]] = {
-    "default": {
-        "opening_line": (
-            "Hi, this is Ava from Trifivend. Are you the right person to speak with "
-            "about smart vending solutions?"
-        )
-    }
-}
-
-# Optional OpenAI compatibility layer (always lazy/fault-tolerant)
+# Optional OpenAI compatibility layer (lazy, never crash boot)
 try:
     from app.openai_compat import (
         create_async_openai_client,
@@ -86,19 +82,16 @@ except Exception as e:  # pragma: no cover
     is_openai_available = lambda: False  # type: ignore
     missing_openai_error = lambda: str(e)  # type: ignore
 
-openai_client = create_async_openai_client(api_key=os.getenv("OPENAI_API_KEY", ""))
+openai_client = create_async_openai_client(api_key=os.getenv("OPENAI_API_KEY", ""))  # may be None
 if not is_openai_available():
-    logger.warning(
-        "OpenAI SDK unavailable; AI responses will error if invoked: %s",
-        missing_openai_error(),
-    )
+    logger.warning("OpenAI SDK unavailable; AI responses will error if invoked: %s", missing_openai_error())
 
 # ──────────────────────────────────────────────────────────────────────────────
 # External/local modules (lazy to avoid import-time crashes)
 # ──────────────────────────────────────────────────────────────────────────────
 try:
     from agent.listen import transcribe_audio
-    from agent.speak import speak_text  # still used by /transcribe fallback
+    from agent.speak import speak_text
     from app.voicebot import coldcall_lead
     from app.backend.supabase_logger import (
         ConversationLog,
@@ -111,7 +104,7 @@ try:
         log_call_event,
     )
 except Exception as e:
-    logger.warning("Deferred import of local modules due to: %s", e)
+    logger.warning("Deferred import of local modules: %s", e)
     transcribe_audio = None  # type: ignore
     speak_text = None  # type: ignore
     coldcall_lead = None  # type: ignore
@@ -124,7 +117,7 @@ except Exception as e:
     log_call = None  # type: ignore
     log_call_event = None  # type: ignore
 
-# TTS chunker → Supabase signed URLs (CDN-backed)
+# Optional TTS chunker (signed URLs); safe if missing
 try:
     from tts_chunker import tts_chunks_to_signed_urls  # returns List[str] of signed MP3 URLs
 except Exception as e:
@@ -134,20 +127,19 @@ except Exception as e:
 # ──────────────────────────────────────────────────────────────────────────────
 # Utilities
 # ──────────────────────────────────────────────────────────────────────────────
+
 def _trim_system_prompt(prompt: str) -> str:
     if not prompt:
         return ""
     tokens = prompt.split()
-    if len(tokens) <= SYSTEM_PROMPT_TOKEN_LIMIT:
-        return prompt
-    return " ".join(tokens[:SYSTEM_PROMPT_TOKEN_LIMIT])
+    return " ".join(tokens[:SYSTEM_PROMPT_TOKEN_LIMIT]) if len(tokens) > SYSTEM_PROMPT_TOKEN_LIMIT else prompt
 
 
 def _require_local_module(name: str, obj: Any):
     if obj is None:
-        raise RuntimeError(
-            f"Module '{name}' is not available (deferred import failed). "
-            "Check your image contents and requirements."
+        raise HTTPException(
+            status_code=500,
+            detail=f"Module '{name}' is not available (deferred import failed). Check image contents and requirements.",
         )
 
 
@@ -184,6 +176,7 @@ def twilio_client() -> TwilioClient:
 # ──────────────────────────────────────────────────────────────────────────────
 # App & middleware
 # ──────────────────────────────────────────────────────────────────────────────
+
 app = FastAPI(title="Trifivend Backend", version="1.2.0")
 
 app.add_middleware(
@@ -194,17 +187,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount Twilio router (modular, absolute URLs, never 500 to Twilio)
+# Twilio voice router (authoritative /twilio-voice lives there)
 try:
     from twilio_utils.webhook_handler import router as twilio_router
-    app.include_router(twilio_router)  # or: prefix="/twilio"
+    app.include_router(twilio_router)
     logger.info("Mounted Twilio webhook router")
-except Exception as e:  # keep the app up even if router import fails
+except Exception as e:
     logger.warning("Twilio router not mounted: %s", e)
+
+# WS voice agent router (optional)
+try:
+    from agent.ws_voice_agent import router as ws_router
+    app.include_router(ws_router)
+    logger.info("Mounted WS voice agent router")
+except Exception as e:
+    logger.warning("WS router not mounted: %s", e)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # MCP shared-secret guard (protect /mcp/* routes)
 # ──────────────────────────────────────────────────────────────────────────────
+
 def _mcp_guard(mcp_secret: str = Header(None, alias="MCP-Secret")) -> None:
     expected = os.getenv("MCP_SHARED_SECRET", "")
     if not expected:
@@ -216,6 +218,7 @@ def _mcp_guard(mcp_secret: str = Header(None, alias="MCP-Secret")) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 # Models (Pydantic v2)
 # ──────────────────────────────────────────────────────────────────────────────
+
 E164_RE = re.compile(r"^\+\d{8,15}$")
 
 
@@ -258,6 +261,7 @@ class HealthOut(BaseModel):
 # ──────────────────────────────────────────────────────────────────────────────
 # Health & root
 # ──────────────────────────────────────────────────────────────────────────────
+
 @app.get("/health", response_model=HealthOut)
 def health() -> HealthOut:
     return HealthOut(
@@ -274,6 +278,7 @@ def root():
 # ──────────────────────────────────────────────────────────────────────────────
 # Audio transcription → reply → speech → log (non-call path)
 # ──────────────────────────────────────────────────────────────────────────────
+
 @app.post("/transcribe")
 async def transcribe(
     file: UploadFile = File(...),
@@ -322,6 +327,7 @@ async def transcribe(
 # ──────────────────────────────────────────────────────────────────────────────
 # Audio endpoint (serves the last synthesized response)
 # ──────────────────────────────────────────────────────────────────────────────
+
 @app.get("/audio/response.mp3")
 async def serve_audio():
     path = "/tmp/response.mp3"
@@ -332,6 +338,7 @@ async def serve_audio():
 # ──────────────────────────────────────────────────────────────────────────────
 # Outbound call API
 # ──────────────────────────────────────────────────────────────────────────────
+
 @app.post("/call")
 async def call_lead(
     body: CallRequest,
@@ -371,7 +378,9 @@ async def call_lead(
     except Exception:
         pass
     else:
-        _schedule_background_coroutine(log_lead, lead, description="lead log", background_tasks=background_tasks)  # type: ignore[misc]
+        _schedule_background_coroutine(
+            log_lead, lead, description="lead log", background_tasks=background_tasks  # type: ignore[misc]
+        )
 
     # Log the call row immediately
     try:
@@ -397,136 +406,9 @@ async def call_lead(
     return {"call_sid": call.sid, "status": getattr(call, "status", "queued")}
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Twilio voice webhook (legacy fallback if router is not mounted)
-# NOTE: Preferred implementation lives in twilio_utils/webhook_handler.py
-# ──────────────────────────────────────────────────────────────────────────────
-@app.post("/twilio-voice")
-async def twilio_voice_legacy(
-    SpeechResult: str = Form(None),
-    CallSid: str = Form(None),
-):
-    _require_local_module("app.voicebot.coldcall_lead", coldcall_lead)
-
-    base = APP_BASE_URL
-    sid = (CallSid or "").strip()
-    cfg = _call_configs.get(sid, {})
-    script_id = cfg.get("script_id") or "default"
-    system_prompt = cfg.get("system_prompt")
-    opening_line = SCRIPTS.get(script_id, SCRIPTS["default"])["opening_line"]
-
-    def _gather_block(prompt: str = "...") -> str:
-        return f"""
-          <Gather input="speech"
-                  action="{base}/twilio-voice"
-                  method="POST"
-                  timeout="5"
-                  speechTimeout="{GATHER_SPEECH_TIMEOUT}">
-            <Say>{prompt}</Say>
-          </Gather>
-        """.strip()
-
-    if not SpeechResult:
-        call_state = _call_configs.setdefault(sid or "no-sid", {})
-        call_state["turn"] = int(call_state.get("turn", 0)) + 1
-        return Response(
-            content=f"""
-<Response>
-  <Say>{opening_line}</Say>
-  {_gather_block("Are you the right person to speak with about vending services?")}
-</Response>""".strip(),
-            media_type="application/xml",
-        )
-
-    try:
-        messages: list[dict[str, str]] = []
-        if system_prompt:
-            messages.append({"role": "system", "content": _trim_system_prompt(system_prompt)})
-        if script_id and script_id != "default":
-            messages.append({"role": "system", "content": f"Use the {script_id} script."})
-        messages.append({"role": "user", "content": SpeechResult})
-
-        reply_text = await run_in_threadpool(coldcall_lead, messages)
-
-        if tts_chunks_to_signed_urls is None:
-            logger.warning("tts_chunker unavailable; using <Say> fallback")
-            return Response(
-                content=f"""
-<Response>
-  <Say>{reply_text}</Say>
-  {_gather_block()}
-</Response>""".strip(),
-                media_type="application/xml",
-            )
-
-        urls = await run_in_threadpool(
-            tts_chunks_to_signed_urls, reply_text, (sid or "no_sid"), "ava", 280
-        )
-
-        if urls:
-            plays = "\n".join(f"  <Play>{u}</Play>" for u in urls)
-            twiml = f"""
-<Response>
-{plays}
-{_gather_block()}
-</Response>""".strip()
-        else:
-            twiml = f"""
-<Response>
-  <Say>{reply_text}</Say>
-  {_gather_block()}
-</Response>""".strip()
-
-        call_state = _call_configs.setdefault(sid or "no-sid", {})
-        call_state["turn"] = int(call_state.get("turn", 0)) + 1
-        await _enqueue(sid or "no-sid", {"event": "reply", "sid": sid or "no-sid", "user": SpeechResult, "bot_reply": reply_text})
-
-        return Response(content=twiml, media_type="application/xml")
-
-    except Exception as e:
-        logger.exception("twilio-voice turn failed: %s", e)
-        return Response(
-            content=f"""
-<Response>
-  <Say>Sorry, I hit a glitch. Could you say that one more time?</Say>
-  {_gather_block()}
-</Response>""".strip(),
-            media_type="application/xml",
-        )
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Fallback TwiML (used when primary handler fails)
-# ──────────────────────────────────────────────────────────────────────────────
-@app.post("/fallback")
-@app.get("/fallback")
-def twilio_fallback():
-    return Response(
-        content="""
-<Response>
-  <Say>Sorry, we hit a snag. Please call us back, or we’ll follow up shortly.</Say>
-  <Hangup/>
-</Response>
-""".strip(),
-        media_type="application/xml",
-    )
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Partial speech callback (lightweight, non-blocking)
-# ──────────────────────────────────────────────────────────────────────────────
-@app.post("/twilio-partial")
-async def twilio_partial(request: Request) -> Response:
-    form = await request.form()
-    sid = (form.get("CallSid") or "").strip()
-    transcript = (form.get("UnstableSpeechResult") or form.get("SpeechResult") or "").strip()
-
-    if not sid or not transcript:
-        return PlainTextResponse("ok", status_code=200)
-
-    await _enqueue(sid, {"event": "partial", "sid": sid, "transcript": transcript})
-    return PlainTextResponse("ok", status_code=200)
-
-# ──────────────────────────────────────────────────────────────────────────────
 # Twilio status callback
 # ──────────────────────────────────────────────────────────────────────────────
+
 @app.post("/status")
 async def status_webhook(request: Request, background_tasks: BackgroundTasks):
     _require_local_module("app.backend.supabase_logger.log_call_event", log_call_event)
@@ -542,13 +424,7 @@ async def status_webhook(request: Request, background_tasks: BackgroundTasks):
     cfg = _call_configs.get(sid, {})
     await _enqueue(
         sid,
-        {
-            "event": "status",
-            "sid": sid,
-            "status": call_status,
-            "script_id": cfg.get("script_id"),
-            "system_prompt": cfg.get("system_prompt"),
-        },
+        {"event": "status", "sid": sid, "status": call_status, "script_id": cfg.get("script_id"), "system_prompt": cfg.get("system_prompt")},
     )
 
     # Log raw status + payload (non-blocking)
@@ -564,9 +440,7 @@ async def status_webhook(request: Request, background_tasks: BackgroundTasks):
     )
     _schedule_background_coroutine(
         log_conversation,  # type: ignore[misc]
-        ConversationLog(
-            user_input="[status update]", bot_reply=call_status or "(unknown)", meta={"call_sid": sid, "payload": payload}
-        ),
+        ConversationLog(user_input="[status update]", bot_reply=call_status or "(unknown)", meta={"call_sid": sid, "payload": payload}),
         description="status log",
         background_tasks=background_tasks,
     )
@@ -581,6 +455,7 @@ async def status_webhook(request: Request, background_tasks: BackgroundTasks):
 # ──────────────────────────────────────────────────────────────────────────────
 # SSE (per-call) for dashboards
 # ──────────────────────────────────────────────────────────────────────────────
+
 _call_configs: Dict[str, Dict[str, Optional[str]]] = {}
 _event_queues: Dict[str, asyncio.Queue[str]] = {}
 
@@ -604,10 +479,7 @@ async def _sse_event_stream(
                 queue_task = asyncio.create_task(queue.get())
 
             try:
-                message = await asyncio.wait_for(
-                    asyncio.shield(queue_task),
-                    timeout=heartbeat_interval,
-                )
+                message = await asyncio.wait_for(asyncio.shield(queue_task), timeout=heartbeat_interval)
             except asyncio.TimeoutError:
                 yield {"event": "ping", "data": "{}"}
                 continue
@@ -662,8 +534,9 @@ async def sse(sid: Optional[str] = None):
     return EventSourceResponse(lambda: ({"event": "done", "data": "{}"} for _ in []))
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Error shaping
+# Error shaping & startup
 # ──────────────────────────────────────────────────────────────────────────────
+
 from fastapi.responses import JSONResponse as _JSONResponse  # alias to avoid confusion
 
 
@@ -678,9 +551,22 @@ async def unhandled_exc_handler(_: Request, exc: Exception):
     return _JSONResponse(status_code=500, content={"detail": f"Internal error: {exc}"})
 
 
+@app.on_event("startup")
+async def _startup_log():
+    # Light, non-blocking startup summary
+    logger.info(
+        "Startup: env=%s port=%s cors_origin=%s twilio_configured=%s openai_key=%s",
+        ENVIRONMENT,
+        os.getenv("PORT", "8080"),
+        FRONTEND_URL if ENVIRONMENT == "production" else "*",
+        bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_NUMBER),
+        "yes" if os.getenv("OPENAI_API_KEY") else "no",
+    )
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Local dev entrypoint (match Fly: dual-stack)
 # ──────────────────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
     import uvicorn
 
