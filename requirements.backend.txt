@@ -14,7 +14,7 @@ python-multipart==0.0.9
 # Integrations
 twilio==9.2.3
 openai==1.47.0
-requests==2.32.3
+requests==2.32.4
 
 # Testing (optional in runtime image)
 pytest-asyncio==0.23.8
