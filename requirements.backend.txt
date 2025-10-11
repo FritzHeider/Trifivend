@@ -2,7 +2,7 @@
 fastapi==0.115.4
 uvicorn[standard]==0.30.6
 pydantic==2.9.2
-starlette==0.40.0
+starlette==0.47.2
 
 # Infra / DX
 python-dotenv==1.0.1
