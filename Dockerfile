@@ -1,20 +1,21 @@
-# Dockerfile — TriFiVend (backend + UI)
-FROM python:3.12-slim AS base
+# Trifivend API – Fly Machines friendly build
+FROM python:3.11-slim
 
-ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PORT=8080
-
-
-# --- deps ---
 WORKDIR /app
-COPY requirements.backend.txt /tmp/requirements.txt
-RUN pip install --upgrade pip setuptools wheel && \
-    pip install -r /tmp/requirements.txt
 
-# copy the app
+# Install backend deps (make sure uvicorn is in this file)
+COPY requirements.backend.txt /app/
+RUN pip install --no-cache-dir -r requirements.backend.txt
+
+# App source
 COPY . /app
 
-# expose + start
+# Network + runtime
+ENV PORT=8080
 EXPOSE 8080
-CMD ["uvicorn", "main:app", "--host", "::", "--port", "8080"]
+
+# Ensure entrypoint is executable
+RUN chmod +x /app/docker-entrypoint.sh
+
+# Correct JSON-array CMD (no shell parsing issues)
+CMD ["/app/docker-entrypoint.sh"]
