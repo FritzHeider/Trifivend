@@ -27,8 +27,7 @@ logs-api-machine:
 	fly logs -a ai-callbot --machine "$$M" --no-tail
 
 # Deploys (remote builder so you don't need local Docker)
-deploy-api:
-	fly deploy -a ai-callbot --remote-only --now
+
 
 deploy-ui:
 	fly deploy -a trifivend-ui --remote-only --now
@@ -37,3 +36,6 @@ deploy-ui:
 set-ui-backend-private:
 	fly secrets set BACKEND_URL=http://ai-callbot.internal:8080 -a trifivend-ui
 	@echo "✅ BACKEND_URL → internal mesh"
+deploy-api:
+	fly deploy --config fly.api.toml --local-only
+	./post_deploy_guard.sh
