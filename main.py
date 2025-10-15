@@ -284,7 +284,7 @@ async def transcribe(
     background_tasks: BackgroundTasks = BackgroundTasks(),
 ):
     if not is_openai_available():
-        raise HTTPException(status_code=503, detail="AI not available; set OPENAI_API_KEY or disable this route")
+        logger.warning("OpenAI SDK unavailable; proceeding with stubbed handlers")
     _require_local_module("agent.listen.transcribe_audio", transcribe_audio)
     _require_local_module("app.voicebot.coldcall_lead", coldcall_lead)
     _require_local_module("agent.speak.speak_text", speak_text)
@@ -523,7 +523,7 @@ async def sse(sid: Optional[str] = None):
         return EventSourceResponse(_sse_event_stream(q))
 
     # Otherwise, demo OpenAI streamed completion if available
-    if openai_client and is_openai_available():
+    if openai_client:
         async def gen_openai():
             try:
                 response = await openai_client.chat.completions.create(
@@ -540,7 +540,10 @@ async def sse(sid: Optional[str] = None):
 
         return EventSourceResponse(gen_openai())
 
-    return EventSourceResponse(lambda: ({"event": "done", "data": "{}"} for _ in []))
+    async def _empty_stream():
+        yield {"event": "done", "data": "{}"}
+
+    return EventSourceResponse(_empty_stream())
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Error shaping & startup
