@@ -18,7 +18,6 @@ from fastapi import (
     Depends,
     FastAPI,
     File,
-    Form,
     Header,
     HTTPException,
     Request,
@@ -60,18 +59,7 @@ TWILIO_AUTH_TOKEN = (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
 TWILIO_NUMBER = (os.getenv("TWILLO_NUMBER") or os.getenv("TWILIO_NUMBER") or "").strip()
 
 # Voice flow tuning
-GATHER_SPEECH_TIMEOUT = os.getenv("GATHER_SPEECH_TIMEOUT", "0.3")  # Twilio expects str/number
 SYSTEM_PROMPT_TOKEN_LIMIT = int(os.getenv("SYSTEM_PROMPT_TOKEN_LIMIT", "300"))
-
-# Simple script registry (extend as needed)
-SCRIPTS: Dict[str, Dict[str, str]] = {
-    "default": {
-        "opening_line": (
-            "Hi, this is Ava from Trifivend. Are you the right person to speak with "
-            "about smart vending solutions?"
-        )
-    }
-}
 
 # Optional OpenAI compatibility layer (always lazy/fault-tolerant)
 try:
@@ -123,13 +111,6 @@ except Exception as e:
     log_lead = None  # type: ignore
     log_call = None  # type: ignore
     log_call_event = None  # type: ignore
-
-# TTS chunker → Supabase signed URLs (CDN-backed)
-try:
-    from tts_chunker import tts_chunks_to_signed_urls  # returns List[str] of signed MP3 URLs
-except Exception as e:
-    tts_chunks_to_signed_urls = None  # type: ignore
-    logger.warning("tts_chunker not importable: %s", e)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Utilities
@@ -395,119 +376,6 @@ async def call_lead(
     await _enqueue(call.sid, {"event": "initiated", "sid": call.sid, "to": body.to})
 
     return {"call_sid": call.sid, "status": getattr(call, "status", "queued")}
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Twilio voice webhook (legacy fallback if router is not mounted)
-# NOTE: Preferred implementation lives in twilio_utils/webhook_handler.py
-# ──────────────────────────────────────────────────────────────────────────────
-@app.post("/twilio-voice")
-async def twilio_voice_legacy(
-    SpeechResult: str = Form(None),
-    CallSid: str = Form(None),
-):
-    _require_local_module("app.voicebot.coldcall_lead", coldcall_lead)
-
-    base = APP_BASE_URL
-    sid = (CallSid or "").strip()
-    cfg = _call_configs.get(sid, {})
-    script_id = cfg.get("script_id") or "default"
-    system_prompt = cfg.get("system_prompt")
-    opening_line = SCRIPTS.get(script_id, SCRIPTS["default"])["opening_line"]
-
-    def _gather_block(prompt: str = "...") -> str:
-        return f"""
-          <Gather input="speech"
-                  action="{base}/twilio-voice"
-                  method="POST"
-                  timeout="5"
-                  speechTimeout="{GATHER_SPEECH_TIMEOUT}">
-            <Say>{prompt}</Say>
-          </Gather>
-        """.strip()
-
-    if not SpeechResult:
-        call_state = _call_configs.setdefault(sid or "no-sid", {})
-        call_state["turn"] = int(call_state.get("turn", 0)) + 1
-        return Response(
-            content=f"""
-<Response>
-  <Say>{opening_line}</Say>
-  {_gather_block("Are you the right person to speak with about vending services?")}
-</Response>""".strip(),
-            media_type="application/xml",
-        )
-
-    try:
-        messages: list[dict[str, str]] = []
-        if system_prompt:
-            messages.append({"role": "system", "content": _trim_system_prompt(system_prompt)})
-        if script_id and script_id != "default":
-            messages.append({"role": "system", "content": f"Use the {script_id} script."})
-        messages.append({"role": "user", "content": SpeechResult})
-
-        reply_text = await run_in_threadpool(coldcall_lead, messages)
-
-        if tts_chunks_to_signed_urls is None:
-            logger.warning("tts_chunker unavailable; using <Say> fallback")
-            return Response(
-                content=f"""
-<Response>
-  <Say>{reply_text}</Say>
-  {_gather_block()}
-</Response>""".strip(),
-                media_type="application/xml",
-            )
-
-        urls = await run_in_threadpool(
-            tts_chunks_to_signed_urls, reply_text, (sid or "no_sid"), "ava", 280
-        )
-
-        if urls:
-            plays = "\n".join(f"  <Play>{u}</Play>" for u in urls)
-            twiml = f"""
-<Response>
-{plays}
-{_gather_block()}
-</Response>""".strip()
-        else:
-            twiml = f"""
-<Response>
-  <Say>{reply_text}</Say>
-  {_gather_block()}
-</Response>""".strip()
-
-        call_state = _call_configs.setdefault(sid or "no-sid", {})
-        call_state["turn"] = int(call_state.get("turn", 0)) + 1
-        await _enqueue(sid or "no-sid", {"event": "reply", "sid": sid or "no-sid", "user": SpeechResult, "bot_reply": reply_text})
-
-        return Response(content=twiml, media_type="application/xml")
-
-    except Exception as e:
-        logger.exception("twilio-voice turn failed: %s", e)
-        return Response(
-            content=f"""
-<Response>
-  <Say>Sorry, I hit a glitch. Could you say that one more time?</Say>
-  {_gather_block()}
-</Response>""".strip(),
-            media_type="application/xml",
-        )
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Fallback TwiML (used when primary handler fails)
-# ──────────────────────────────────────────────────────────────────────────────
-@app.post("/fallback")
-@app.get("/fallback")
-def twilio_fallback():
-    return Response(
-        content="""
-<Response>
-  <Say>Sorry, we hit a snag. Please call us back, or we’ll follow up shortly.</Say>
-  <Hangup/>
-</Response>
-""".strip(),
-        media_type="application/xml",
-    )
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Partial speech callback (lightweight, non-blocking)
