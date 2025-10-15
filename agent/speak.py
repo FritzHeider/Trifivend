@@ -1,52 +1,60 @@
-# agent/speak.py
+"""Speech synthesis helpers."""
 from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
+from typing import Optional
+
+import requests
 
 logger = logging.getLogger("trifivend.speak")
 
-ELEVEN_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+_DEFAULT_OUTPUT = Path("/tmp/response.mp3")
 
-def speak_text(text: str) -> None:
+
+def _env(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
+
+
+def speak_text(text: str, output_path: Optional[str] = None, *, timeout: float = 10.0) -> str:
+    """Synthesize ``text`` using ElevenLabs and return the written file path.
+
+    The helper mirrors the behaviour used by the FastAPI endpoints while also
+    being test-friendly:
+
+    * API credentials come from ``ELEVEN_API_KEY`` / ``ELEVEN_VOICE_ID``.
+    * ``output_path`` defaults to ``/tmp/response.mp3`` to keep existing
+      integrations working.
+    * Network errors raise ``RuntimeError`` so callers can handle fallbacks.
     """
-    Blocking helper that synthesizes to /tmp/response.mp3 for dev paths.
-    In prod, prefer chunked signed URLs via tts_chunker (handled upstream).
-    If ElevenLabs is configured, try a quick synth; otherwise write a tiny silent MP3 placeholder.
-    """
-    out_path = "/tmp/response.mp3"
 
-    if ELEVEN_API_KEY:
-        try:
-            import requests
-            voice_id = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")  # Rachel default
-            url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-            payload = {
-                "text": text[:1000],
-                "model_id": os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2"),
-                "voice_settings": {"stability": 0.5, "similarity_boost": 0.7},
-            }
-            headers = {
-                "xi-api-key": ELEVEN_API_KEY,
-                "accept": "audio/mpeg",
-                "content-type": "application/json",
-            }
-            r = requests.post(url, json=payload, headers=headers, timeout=30)
-            r.raise_for_status()
-            with open(out_path, "wb") as f:
-                f.write(r.content)
-            return
-        except Exception:
-            logger.exception("ElevenLabs synthesis failed; writing placeholder mp3")
+    api_key = _env("ELEVEN_API_KEY")
+    voice_id = _env("ELEVEN_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
+    target = Path(output_path) if output_path else _DEFAULT_OUTPUT
 
-    # Fallback: emit a tiny silent MP3 (1 frame) so clients don’t 404
+    if not api_key:
+        raise RuntimeError("ElevenLabs TTS failed: ELEVEN_API_KEY not configured")
+
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    payload = {
+        "text": text,
+        "model_id": _env("ELEVEN_MODEL", "eleven_multilingual_v2"),
+        "voice_settings": {"stability": 0.5, "similarity_boost": 0.7},
+    }
+    headers = {
+        "xi-api-key": api_key,
+        "accept": "audio/mpeg",
+        "content-type": "application/json",
+    }
+
     try:
-        # 1-second of silence MP3 frame (pre-encoded). This is a tiny constant byte-string.
-        SILENT_MP3 = (
-            b"\x49\x44\x33\x03\x00\x00\x00\x00\x00\x21\x54\x41\x4c\x42\x00\x00\x00\x0f\x00\x00"
-            b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xfb\x90\x64\x00\x0f\xff\xfc\x21\x84"
-        )
-        with open(out_path, "wb") as f:
-            f.write(SILENT_MP3)
-    except Exception:
-        logger.exception("Failed to write placeholder MP3")
+        response = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        response.raise_for_status()
+    except requests.RequestException as exc:  # pragma: no cover - network path
+        logger.exception("ElevenLabs synthesis request failed")
+        raise RuntimeError("ElevenLabs TTS failed") from exc
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(response.content)
+    return str(target)

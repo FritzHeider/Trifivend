@@ -1,79 +1,104 @@
-# twilio_utils/webhook_handler.py
+"""Minimal Twilio webhook handler used in tests and local dev."""
 from __future__ import annotations
 
-import os
+import asyncio
 import logging
-from typing import Optional, List
+import os
+from typing import Optional
 
-from fastapi import APIRouter, Request
+from importlib import import_module
+
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import PlainTextResponse, Response
 from twilio.twiml.voice_response import VoiceResponse, Gather
 
 logger = logging.getLogger("trifivend.twilio")
 router = APIRouter()
 
-# Lazy imports to avoid boot crashes if optional deps are missing
-try:
-    from app.voicebot import coldcall_lead
-except Exception as e:
-    coldcall_lead = None  # type: ignore
-    logger.warning("voicebot unavailable in webhook: %s", e)
+APP_BASE_URL = os.getenv("APP_BASE_URL", "https://your-app.fly.dev").rstrip("/")
+AUDIO_ENDPOINT = "/audio/response.mp3"
 
-# Environment knobs
-GATHER_SPEECH_TIMEOUT = float(os.getenv("GATHER_SPEECH_TIMEOUT", "0.3"))
-LANG = os.getenv("TTS_LANG", "en-US")
-VOICE = os.getenv("TTS_VOICE", "polly.Matthew")  # Twilio `<Say voice="">` options; ignored if using <Play>
+
+def _resolve_coldcall():
+    try:
+        module = import_module("app.voicebot")
+        return getattr(module, "coldcall_lead", None)
+    except Exception as exc:  # pragma: no cover
+        logger.warning("voicebot unavailable in webhook: %s", exc)
+        return None
+
+
+def _resolve_speak():
+    try:
+        module = import_module("agent.speak")
+        return getattr(module, "speak_text", None)
+    except Exception as exc:  # pragma: no cover
+        logger.warning("speak_text unavailable: %s", exc)
+        return None
+
+
+def speak_text(message: str) -> Optional[str]:
+    synth = _resolve_speak()
+    if synth is None:
+        logger.warning("speak_text not configured; skipping synthesis")
+        return None
+    return synth(message)
 
 
 @router.post("/twilio-voice")
 async def twilio_voice(request: Request) -> Response:
-    """
-    Primary Twilio webhook.
-    - First hit has no SpeechResult -> prompt user.
-    - Subsequent hits include SpeechResult -> call LLM -> respond.
-    """
     form = await request.form()
-    speech: str = (form.get("SpeechResult") or "").strip()
-    call_sid: str = (form.get("CallSid") or "").strip()
+    speech = (form.get("SpeechResult") or "").strip()
 
-    resp = VoiceResponse()
+    response = VoiceResponse()
 
     if not speech:
-        # Initial prompt
-        g = Gather(
+        gather = Gather(
             input="speech",
-            speech_timeout=str(GATHER_SPEECH_TIMEOUT),
-            action="/twilio-voice",  # POST back here
+            speech_timeout=os.getenv("GATHER_SPEECH_TIMEOUT", "0.3"),
+            action="/twilio-voice",
             method="POST",
         )
-        g.say("Hello! This is Ava from TriFiVend. Quick question for you.", language=LANG, voice=VOICE)
-        resp.append(g)
-        # Fallback if no input
-        resp.say("Sorry, I didn't catch that. Let's try again.", language=LANG, voice=VOICE)
-        resp.redirect("/twilio-voice", method="POST")
-        return PlainTextResponse(str(resp), media_type="application/xml")
-
-    if coldcall_lead is None:
-        resp.say("Our service is temporarily unavailable. Please try again later.", language=LANG, voice=VOICE)
-        return PlainTextResponse(str(resp), media_type="application/xml")
-
-    # Build minimal chat history; Twilio calls are terse
-    try:
-        reply: str = await request.app.state.loop.run_in_executor(  # type: ignore[attr-defined]
-            None, lambda: coldcall_lead([{"role": "user", "content": speech}])
+        gather.say(
+            "Hello! This is Ava from Trifivend. Quick question for you.",
+            language=os.getenv("TTS_LANG", "en-US"),
+            voice=os.getenv("TTS_VOICE", "polly.Matthew"),
         )
-    except Exception as e:
-        logger.exception("voicebot failure: %s", e)
-        resp.say("I hit a snag processing that. Could we try again?", language=LANG, voice=VOICE)
-        return PlainTextResponse(str(resp), media_type="application/xml")
+        response.append(gather)
+        response.say(
+            "Sorry, I didn't catch that. Let's try again.",
+            language=os.getenv("TTS_LANG", "en-US"),
+            voice=os.getenv("TTS_VOICE", "polly.Matthew"),
+        )
+        response.redirect("/twilio-voice", method="POST")
+        return PlainTextResponse(str(response), media_type="application/xml")
 
-    # Say the reply and re-gather
-    g = Gather(
+    coldcall = _resolve_coldcall()
+
+    if coldcall is None:
+        response.say("Our service is temporarily unavailable. Please try again later.")
+        return PlainTextResponse(str(response), media_type="application/xml")
+
+    try:
+        reply = await asyncio.to_thread(coldcall, [{"role": "user", "content": speech}])
+    except Exception as exc:  # pragma: no cover - network path
+        logger.exception("voicebot failure: %s", exc)
+        response.say("I hit a snag processing that. Could we try again?")
+        return PlainTextResponse(str(response), media_type="application/xml")
+
+    speak_text(reply)
+
+    playback_url = f"{APP_BASE_URL}{AUDIO_ENDPOINT}"
+    response.play(playback_url)
+    gather = Gather(
         input="speech",
-        speech_timeout=str(GATHER_SPEECH_TIMEOUT),
+        speech_timeout=os.getenv("GATHER_SPEECH_TIMEOUT", "0.3"),
         action="/twilio-voice",
         method="POST",
     )
-    g.say(reply, language=LANG, voice=VOICE)
-    resp.append(g)
-    return PlainTextResponse(str(resp), media_type="application/xml")
+    response.append(gather)
+    return PlainTextResponse(str(response), media_type="application/xml")
+
+
+app = FastAPI()
+app.include_router(router)
