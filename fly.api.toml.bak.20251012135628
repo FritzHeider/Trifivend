@@ -3,12 +3,18 @@ primary_region = "sjc"
 
 [http_service]
   internal_port = 8080
+  min_machines_running = 1
 
   [http_service.concurrency]
     type = "connections"
     hard_limit = 50
     soft_limit = 40
- 
+
+
+  
+force_https = true
+auto_stop_machines = true
+auto_start_machines = true
 [checks]
   [checks.health]
     type     = "http"

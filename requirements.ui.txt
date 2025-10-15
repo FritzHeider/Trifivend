@@ -1,6 +1,2 @@
-streamlit>=1.36,<1.41
-httpx>=0.27,<0.28
-pydantic>=2.7,<3.0
-pandas
-python-dotenv
-requests
+# If you have Python-based tooling for the UI, keep it minimal. Otherwise you can delete this file.
+python-dotenv==1.0.1

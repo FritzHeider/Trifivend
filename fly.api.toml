@@ -1,22 +1,41 @@
+# fly.api.toml
 app = "ai-callbot"
-primary_region = "sjc"
+primary_region = "iad"
 
-[http_service]
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+
+[[services]]
+  protocol = "tcp"
   internal_port = 8080
-  min_machines_running = 1
 
-  [http_service.concurrency]
-    type = "connections"
-    hard_limit = 50
-    soft_limit = 40
+  [[services.ports]]
+    handlers = ["http"]
+    port = 80
 
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
 
- 
-[checks]
-  [checks.health]
-    type     = "http"
-    port     = 8080
-    method   = "GET"
-    path     = "/health"
-    interval = "5s"
-    timeout  = "5s"
+  [services.concurrency]
+    type = "requests"
+    soft_limit = 75
+    hard_limit = 100
+
+  [[services.tcp_checks]]
+    interval = "15s"
+    timeout = "2s"
+    grace_period = "10s"
+    restart_limit = 0
+
+  [[services.http_checks]]
+    interval = "15s"
+    method = "get"
+    path = "/health"
+    protocol = "http"
+    timeout = "2s"
+    tls_skip_verify = false
+    grace_period = "10s"

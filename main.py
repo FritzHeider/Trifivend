@@ -3,14 +3,14 @@
 # Trifivend FastAPI backend:
 # - Twilio webhooks live in twilio_utils/webhook_handler.py (authoritative)
 # - Optional WS voice agent in agent/ws_voice_agent.py
-# - /call kicks off outbound calls (Twilio client)
+# - /call kicks off outbound calls (Twilio REST)
 # - /transcribe -> STT -> reply -> TTS (non-call path)
-# - SSE for live dashboards
+# - SSE for live dashboards (per-call)
 # - Health is shallow & deterministic
 # Production notes:
 #   • Run with: uvicorn main:app --host :: --port 8080
 #   • Fly Machines internal_port must match 8080
-#   • APP_BASE_URL must be public (Twilio)
+#   • APP_BASE_URL must be public (for Twilio)
 # ──────────────────────────────────────────────────────────────────────────────
 
 from __future__ import annotations
@@ -32,7 +32,6 @@ from fastapi import (
     Depends,
     FastAPI,
     File,
-    Form,
     Header,
     HTTPException,
     Request,
@@ -177,7 +176,7 @@ def twilio_client() -> TwilioClient:
 # App & middleware
 # ──────────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Trifivend Backend", version="1.2.0")
+app = FastAPI(title="Trifivend Backend", version="1.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -284,6 +283,8 @@ async def transcribe(
     file: UploadFile = File(...),
     background_tasks: BackgroundTasks = BackgroundTasks(),
 ):
+    if not is_openai_available():
+        raise HTTPException(status_code=503, detail="AI not available; set OPENAI_API_KEY or disable this route")
     _require_local_module("agent.listen.transcribe_audio", transcribe_audio)
     _require_local_module("app.voicebot.coldcall_lead", coldcall_lead)
     _require_local_module("agent.speak.speak_text", speak_text)
@@ -305,8 +306,16 @@ async def transcribe(
             coldcall_lead, [{"role": "user", "content": user_input}]  # type: ignore[misc]
         )
 
-        # Non-blocking TTS to /tmp/response.mp3 (legacy dev path)
-        background_tasks.add_task(run_in_threadpool, speak_text, bot_reply)  # type: ignore[arg-type]
+        # Prefer chunked TTS URLs if available, else dev fallback
+        audio_urls: list[str] = []
+        if tts_chunks_to_signed_urls:
+            try:
+                audio_urls = await run_in_threadpool(tts_chunks_to_signed_urls, bot_reply)  # type: ignore[misc]
+            except Exception:
+                logger.exception("tts_chunks_to_signed_urls failed; falling back")
+        if not audio_urls:
+            background_tasks.add_task(run_in_threadpool, speak_text, bot_reply)  # type: ignore[arg-type]
+            audio_urls = ["/audio/response.mp3"]
 
         # Log convo (best-effort)
         _schedule_background_coroutine(
@@ -316,7 +325,7 @@ async def transcribe(
             background_tasks=background_tasks,
         )
 
-        return {"transcription": user_input, "response": bot_reply, "audio_url": "/audio/response.mp3"}
+        return {"transcription": user_input, "response": bot_reply, "audio_urls": audio_urls}
     except Exception as e:
         logger.exception("Transcription pipeline failed")
         raise HTTPException(status_code=500, detail=f"Transcription failed: {e}")
@@ -325,7 +334,7 @@ async def transcribe(
             os.remove(tmp_path)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Audio endpoint (serves the last synthesized response)
+# Audio endpoint (serves the last synthesized response in dev mode)
 # ──────────────────────────────────────────────────────────────────────────────
 
 @app.get("/audio/response.mp3")
@@ -514,7 +523,7 @@ async def sse(sid: Optional[str] = None):
         return EventSourceResponse(_sse_event_stream(q))
 
     # Otherwise, demo OpenAI streamed completion if available
-    if openai_client:
+    if openai_client and is_openai_available():
         async def gen_openai():
             try:
                 response = await openai_client.chat.completions.create(
@@ -569,7 +578,6 @@ async def _startup_log():
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(
         "main:app",
         host="::",  # dual-stack like production (Fly uses IPv6-first)

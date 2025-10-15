@@ -1,162 +1,62 @@
-"""Simple wrapper around the OpenAI Chat API used for lead engagement."""
-
+# app/voicebot.py
 from __future__ import annotations
 
-import asyncio
-import logging
 import os
-from collections.abc import AsyncGenerator, Sequence
-from typing import List, MutableSequence
+import logging
+from typing import List, Dict, Any
 
-from app.openai_compat import (
-    create_async_openai_client,
-    is_openai_available,
-    missing_openai_error,
+logger = logging.getLogger("trifivend.voicebot")
+
+try:
+    from app.openai_compat import create_async_openai_client, is_openai_available
+except Exception as e:
+    create_async_openai_client = None  # type: ignore
+    is_openai_available = lambda: False  # type: ignore
+    logger.warning("OpenAI compat missing in voicebot: %s", e)
+
+SYSTEM_PROMPT = (
+    "You are Ava, a concise, friendly AI cold-caller for TriFiVend. "
+    "Qualify property managers for installing premium vending machines. "
+    "Ask one question at a time. Keep replies under 25 words."
 )
 
-# -----------------------------------------------------------------------------
-# Config
-# -----------------------------------------------------------------------------
-MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-logger = logging.getLogger(__name__)
-async_client = create_async_openai_client(api_key=os.getenv("OPENAI_API_KEY"))
-if not is_openai_available():  # pragma: no cover - exercised when dependency missing
-    logger.warning(
-        "OpenAI SDK unavailable; streaming replies will raise until installed: %s",
-        missing_openai_error(),
-    )
+def _trim(text: str, limit: int = 250) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= limit else (text[:limit] + "…")
 
-
-def _require_async_client() -> None:
-    """Ensure the OpenAI async client is available before issuing requests."""
-
-    if async_client is None:
-        raise RuntimeError(
-            "OpenAI async client unavailable. Install the OpenAI SDK and configure "
-            f"OPENAI_API_KEY. Details: {missing_openai_error()}"
-        )
-
-# Lower thresholds for faster first audio
-_SENTENCE_DELIMITERS = (".", "?", "!", "\n")
-_MIN_FLUSH_CHARS = 60     # ~1 short clause
-_MAX_FLUSH_CHARS = 80     # hard push to speak
-# First-turn token cap to avoid long monologues; tune per use case
-_FIRST_TURN_MAX_TOKENS = 90
-
-
-# -----------------------------------------------------------------------------
-# Streaming API
-# -----------------------------------------------------------------------------
-async def stream_coldcall_reply(
-    messages: Sequence[dict],
-    *,
-    temperature: float = 0.6,
-    model: str = MODEL_NAME,
-    is_first_turn: bool = True,
-) -> AsyncGenerator[str, None]:
-    """Yield incremental text responses from the assistant.
-
-    Tokens are buffered until a likely sentence boundary (or a safety length),
-    then flushed to the caller. Keeps UX snappy for TTS/voice and chat UIs.
+def coldcall_lead(messages: List[Dict[str, Any]]) -> str:
     """
-    _require_async_client()
-
-    buffer = ""
-
-    params = {
-        "model": model,
-        "messages": list(messages),
-        "temperature": temperature,
-        "stream": True,
-    }
-    if is_first_turn:
-        # Small opener for snappier TTS; you can follow with a continuation call if needed
-        params["max_tokens"] = _FIRST_TURN_MAX_TOKENS
-
-    try:
-        # Chat Completions remain supported (Responses API is the new default,
-        # but this endpoint is still fine for text chat). :contentReference[oaicite:0]{index=0}
-        response = await async_client.chat.completions.create(**params)
-
-        async for chunk in response:
-            # Defensive: some chunks may not include content deltas.
-            if not chunk.choices:
-                continue
-            delta = getattr(chunk.choices[0].delta, "content", None)
-            if not delta:
-                continue
-
-            buffer += delta
-            if (
-                len(buffer) >= _MAX_FLUSH_CHARS
-                or any(d in buffer for d in _SENTENCE_DELIMITERS) and len(buffer) >= _MIN_FLUSH_CHARS
-            ):
-                flushed, buffer = buffer.strip(), ""
-                if flushed:
-                    yield flushed
-
-    except Exception as e:  # pragma: no cover
-        raise RuntimeError(f"AI streaming response failed: {e}") from e
-
-    # Flush trailing text if the stream closed mid-sentence.
-    tail = buffer.strip()
-    if tail:
-        yield tail
-
-
-# -----------------------------------------------------------------------------
-# Convenience collectors
-# -----------------------------------------------------------------------------
-async def _collect_reply(
-    messages: Sequence[dict],
-    *,
-    temperature: float = 0.6,
-    model: str = MODEL_NAME,
-    is_first_turn: bool = True,
-) -> str:
-    parts: MutableSequence[str] = []
-    async for part in stream_coldcall_reply(
-        messages,
-        temperature=temperature,
-        model=model,
-        is_first_turn=is_first_turn,
-    ):
-        parts.append(part)
-    return " ".join(parts).strip()
-
-
-def coldcall_lead(
-    messages: List[dict],
-    temperature: float = 0.6,
-    model: str = MODEL_NAME,
-    is_first_turn: bool = True,
-) -> str:
-    """Synchronous wrapper for legacy callers (tests, scripts).
-
-    If you're inside an event loop (e.g., FastAPI/UVicorn request context),
-    call `stream_coldcall_reply` directly instead of this helper.
+    Synchronous helper used from threadpool. If OpenAI is present, call it;
+    otherwise return a deterministic, helpful canned reply for testing.
+    messages: [{"role":"user"|"system"|"assistant","content": "..."}]
     """
-    _require_async_client()
+    user_utterance = ""
+    for m in messages[::-1]:
+        if m.get("role") == "user":
+            user_utterance = str(m.get("content") or "")
+            break
 
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
+    if is_openai_available and is_openai_available():
+        try:
+            client = create_async_openai_client(os.getenv("OPENAI_API_KEY", ""))
+            # Call chat completions synchronously via .run call (we're in a threadpool)
+            import asyncio
+            async def _go():
+                resp = await client.chat.completions.create(
+                    model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                    messages=[{"role": "system", "content": SYSTEM_PROMPT}] + messages,
+                    temperature=0.4,
+                    max_tokens=90,
+                )
+                return resp.choices[0].message.content.strip()
 
-    if loop and loop.is_running():  # pragma: no cover
-        raise RuntimeError(
-            "coldcall_lead() cannot be called from a running event loop; "
-            "use `stream_coldcall_reply` instead."
-        )
+            return asyncio.run(_go())  # isolated thread event loop
+        except Exception:
+            logger.exception("OpenAI chat failure; falling back")
 
-    try:
-        return asyncio.run(
-            _collect_reply(
-                messages,
-                temperature=temperature,
-                model=model,
-                is_first_turn=is_first_turn,
-            )
-        )
-    except Exception as e:
-        raise RuntimeError(f"AI response failed: {e}") from e
+    # Fallback deterministic script
+    if not user_utterance:
+        return "Hi! Quick question—do you manage multi-unit properties that allow vending machines?"
+    if "busy" in user_utterance.lower():
+        return "Totally get it. When’s a better time for a 60-second call—today afternoon or tomorrow morning?"
+    return "Great. Roughly how many units does your property have and is there foot traffic near a lobby or gym?"

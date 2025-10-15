@@ -1,20 +1,34 @@
-# Venvs & caches
-.venv
-venv
-__pycache__
-*.pyc
-.cache
-.dist
-build
-node_modules
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pdb
+*.pytest_cache/
+.mypy_cache/
+.pytype/
+.coverage
+htmlcov/
 
-# Git & local config
-.git
-.gitignore
+# Node
+node_modules/
+ui/node_modules/
+ui/.next/
+ui/.vercel/
+
+# Env & secrets
 .env
 .env.*
-secrets.toml
-.streamlit
+!.env.example
 
-# Tests/UI-only assets
+# VCS & editor
+.git
+.gitignore
+.vscode
+.idea
+.DS_Store
+
+# Build artifacts
+dist/
+build/
 *.log

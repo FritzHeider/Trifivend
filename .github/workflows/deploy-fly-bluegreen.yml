@@ -1,0 +1,45 @@
+name: deploy-fly-bluegreen
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [ main ]
+    paths:
+      - "Dockerfile"
+      - "fly.api.toml"
+      - "**/*.py"
+      - "requirements*.txt"
+      - ".github/workflows/deploy-fly-bluegreen.yml"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy (blue/green)
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          flyctl deploy -c fly.api.toml --remote-only --strategy bluegreen --wait-timeout 600
+
+      - name: Post-deploy health gate
+        run: |
+          set -euo pipefail
+          APP_URL="${APP_URL:-https://ai-callbot.fly.dev}"
+          echo "Health check: $APP_URL/health"
+          for i in {1..30}; do
+            code=$(curl -fsS -o /dev/null -w "%{http_code}" "$APP_URL/health" || true)
+            echo "Attempt $i -> $code"
+            if [ "$code" = "200" ]; then
+              echo "Healthy ✅"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Health never reached 200 ❌"
+          exit 1
