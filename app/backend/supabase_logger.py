@@ -1,22 +1,44 @@
 # app/backend/supabase_logger.py
 from __future__ import annotations
 
-import json
 import logging
 import os
-from typing import Any, Dict, Optional, Tuple
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, Optional
 
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger("trifivend.supabase")
 
 
-def _credentials() -> Tuple[str, str]:
-    """Return the Supabase URL and service key from the environment."""
+@dataclass(frozen=True)
+class _SupabaseConfig:
+    """Small helper describing the credentials required for Supabase."""
+
+    url: str
+    key: str
+
+    def headers(self, extras: Optional[Iterable[tuple[str, str]]] = None) -> Dict[str, str]:
+        base = {
+            "apikey": self.key,
+            "Authorization": f"Bearer {self.key}",
+            "Content-Type": "application/json",
+        }
+        if extras:
+            for extra_key, value in extras:
+                base[extra_key] = value
+        return base
+
+
+def _credentials() -> Optional[_SupabaseConfig]:
+    """Return Supabase credentials if fully configured."""
 
     url = os.getenv("SUPABASE_URL", "").rstrip("/")
     key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY") or ""
-    return url, key
+    if not (url and key):
+        return None
+    return _SupabaseConfig(url=url, key=key)
 
 
 def _missing_credentials_message() -> None:
@@ -25,55 +47,52 @@ def _missing_credentials_message() -> None:
     logger.warning(message)
 
 
-async def _post_json(
-    url: str,
-    headers: Dict[str, str],
-    payload: Dict[str, Any],
-    *,
-    client: Optional["httpx.AsyncClient"],
-) -> None:
+@asynccontextmanager
+async def _client_context(client: Optional["httpx.AsyncClient"], timeout: float = 10.0):
     import httpx
 
-    close_client = False
-    request_client: "httpx.AsyncClient"
-    if client is None:
-        request_client = httpx.AsyncClient(timeout=10)
-        close_client = True
-    else:
-        request_client = client
+    if client is not None:
+        yield client
+        return
 
+    managed_client = httpx.AsyncClient(timeout=timeout)
     try:
-        response = await request_client.post(url, headers=headers, json=payload)
-        response.raise_for_status()
+        yield managed_client
     finally:
-        if close_client:
-            await request_client.aclose()
+        await managed_client.aclose()
 
 
-async def _get_json(
-    url: str,
-    headers: Dict[str, str],
-    params: Dict[str, str],
+async def _request(
+    method: str,
+    path: str,
     *,
-    client: Optional["httpx.AsyncClient"],
-) -> Optional[list]:
-    import httpx
+    config: _SupabaseConfig,
+    payload: Optional[Dict[str, Any]] = None,
+    params: Optional[Dict[str, str]] = None,
+    prefer: Optional[str] = None,
+    client: Optional["httpx.AsyncClient"] = None,
+) -> Optional[Any]:
+    headers_extra: Optional[Iterable[tuple[str, str]]] = None
+    if prefer:
+        headers_extra = (("Prefer", prefer),)
 
-    close_client = False
-    request_client: "httpx.AsyncClient"
-    if client is None:
-        request_client = httpx.AsyncClient(timeout=10)
-        close_client = True
-    else:
-        request_client = client
+    headers = config.headers(headers_extra)
+    url = f"{config.url}{path}"
 
-    try:
-        response = await request_client.get(url, headers=headers, params=params)
+    async with _client_context(client) as http_client:
+        response = await http_client.request(
+            method,
+            url,
+            headers=headers,
+            json=payload,
+            params=params,
+        )
         response.raise_for_status()
-        return response.json()
-    finally:
-        if close_client:
-            await request_client.aclose()
+        return response.json() if method.upper() == "GET" else None
+
+
+def _log_locally(prefix: str, payload: BaseModel) -> None:
+    logger.info("%s %s", prefix, payload.model_dump_json())
 
 
 class ConversationLog(BaseModel):
@@ -115,81 +134,68 @@ class CallEvent(BaseModel):
 async def log_conversation(
     data: ConversationLog, *, client: Optional["httpx.AsyncClient"] = None
 ) -> None:
-    url, key = _credentials()
-    if not (url and key):
+    config = _credentials()
+    if not config:
         _missing_credentials_message()
-        logger.info("CONVERSATION %s", data.model_dump_json())
+        _log_locally("CONVERSATION", data)
         return
 
     try:
-        await _post_json(
-            f"{url}/rest/v1/conversations",
-            {
-                "apikey": key,
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json",
-                "Prefer": "return=minimal",
-            },
-            data.model_dump(),
+        await _request(
+            "POST",
+            "/rest/v1/conversations",
+            config=config,
+            payload=data.model_dump(),
+            prefer="return=minimal",
             client=client,
         )
     except Exception:
         logger.exception("Supabase conversation insert failed; logged locally")
-        logger.info("CONVERSATION %s", data.model_dump_json())
+        _log_locally("CONVERSATION", data)
 
 
 async def log_lead(lead: Lead, *, client: Optional["httpx.AsyncClient"] = None) -> None:
-    url, key = _credentials()
-    if not (url and key):
+    config = _credentials()
+    if not config:
         _missing_credentials_message()
-        logger.info("LEAD %s", lead.model_dump_json())
+        _log_locally("LEAD", lead)
         return
 
     try:
-        await _post_json(
-            f"{url}/rest/v1/leads",
-            {
-                "apikey": key,
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json",
-                "Prefer": "return=minimal",
-            },
-            lead.model_dump(exclude_none=True),
+        await _request(
+            "POST",
+            "/rest/v1/leads",
+            config=config,
+            payload=lead.model_dump(exclude_none=True),
+            prefer="return=minimal",
             client=client,
         )
     except Exception:
         logger.exception("Supabase lead insert failed; logged locally")
-        logger.info("LEAD %s", lead.model_dump_json())
+        _log_locally("LEAD", lead)
 
 
 async def log_script(
     script: LeadScript, *, client: Optional["httpx.AsyncClient"] = None
 ) -> None:
-    url, key = _credentials()
-    if not (url and key):
+    config = _credentials()
+    if not config:
         _missing_credentials_message()
-        logger.info("LEAD_SCRIPT %s", script.model_dump_json())
+        _log_locally("LEAD_SCRIPT", script)
         return
 
-    headers = {
-        "apikey": key,
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-        "Prefer": "return=minimal,resolution=merge-duplicates",
-    }
-
-    payload = script.model_dump(exclude_none=True)
-
     try:
-        await _post_json(
-            f"{url}/rest/v1/lead_scripts?on_conflict=lead_phone,script_id",
-            headers,
-            payload,
+        await _request(
+            "POST",
+            "/rest/v1/lead_scripts?on_conflict=lead_phone,script_id",
+            config=config,
+            payload=script.model_dump(exclude_none=True),
+            prefer="return=minimal,resolution=merge-duplicates",
             client=client,
         )
     except Exception:
         logger.exception("Supabase lead_script upsert failed; logged locally")
-        logger.info("LEAD_SCRIPT %s", script.model_dump_json())
+        _log_locally("LEAD_SCRIPT", script)
 
 
 async def get_script(
@@ -198,16 +204,11 @@ async def get_script(
     *,
     client: Optional["httpx.AsyncClient"] = None,
 ) -> Optional[LeadScript]:
-    url, key = _credentials()
-    if not (url and key):
+    config = _credentials()
+    if not config:
         _missing_credentials_message()
         return None
 
-    headers = {
-        "apikey": key,
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-    }
     params = {
         "select": "*",
         "lead_phone": f"eq.{lead_phone}",
@@ -217,10 +218,11 @@ async def get_script(
     }
 
     try:
-        items = await _get_json(
-            f"{url}/rest/v1/lead_scripts",
-            headers,
-            params,
+        items = await _request(
+            "GET",
+            "/rest/v1/lead_scripts",
+            config=config,
+            params=params,
             client=client,
         )
     except Exception:
@@ -234,50 +236,44 @@ async def get_script(
 
 
 async def log_call(call: Call, *, client: Optional["httpx.AsyncClient"] = None) -> None:
-    url, key = _credentials()
-    if not (url and key):
+    config = _credentials()
+    if not config:
         _missing_credentials_message()
-        logger.info("CALL %s", call.model_dump_json())
+        _log_locally("CALL", call)
         return
 
     try:
-        await _post_json(
-            f"{url}/rest/v1/calls",
-            {
-                "apikey": key,
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json",
-                "Prefer": "return=minimal",
-            },
-            call.model_dump(),
+        await _request(
+            "POST",
+            "/rest/v1/calls",
+            config=config,
+            payload=call.model_dump(),
+            prefer="return=minimal",
             client=client,
         )
     except Exception:
         logger.exception("Supabase call insert failed; logged locally")
-        logger.info("CALL %s", call.model_dump_json())
+        _log_locally("CALL", call)
 
 
 async def log_call_event(
     evt: CallEvent, *, client: Optional["httpx.AsyncClient"] = None
 ) -> None:
-    url, key = _credentials()
-    if not (url and key):
+    config = _credentials()
+    if not config:
         _missing_credentials_message()
-        logger.info("CALL_EVENT %s", evt.model_dump_json())
+        _log_locally("CALL_EVENT", evt)
         return
 
     try:
-        await _post_json(
-            f"{url}/rest/v1/call_events",
-            {
-                "apikey": key,
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json",
-                "Prefer": "return=minimal",
-            },
-            evt.model_dump(),
+        await _request(
+            "POST",
+            "/rest/v1/call_events",
+            config=config,
+            payload=evt.model_dump(),
+            prefer="return=minimal",
             client=client,
         )
     except Exception:
         logger.exception("Supabase call_event insert failed; logged locally")
-        logger.info("CALL_EVENT %s", evt.model_dump_json())
+        _log_locally("CALL_EVENT", evt)
