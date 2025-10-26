@@ -1,25 +1,7 @@
-# Core API
 fastapi==0.115.4
-starlette==0.41.2
-
-# Pydantic v2 — align with storage3/realtime deps that wanted >=2.11.7
-pydantic==2.11.7
-pydantic-core==2.23.4
-typing-extensions==4.12.2
-
-# Server
 uvicorn==0.32.0
-
-# SSE
-sse-starlette==2.1.3
-
-# Twilio
-twilio==9.2.3
-
-# HTTP clients/util
-httpx==0.27.2
-requests==2.32.3
+pydantic==2.11.7
+pydantic-settings==2.6.1
 python-dotenv==1.0.1
-
-# OpenAI SDK (async client wrapper)
-openai==1.51.2
+twilio==9.2.3
+httpx==0.27.2
