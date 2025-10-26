@@ -1,2 +1,0 @@
-# If you have Python-based tooling for the UI, keep it minimal. Otherwise you can delete this file.
-python-dotenv==1.0.1

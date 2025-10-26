@@ -1,40 +1,48 @@
-# TriFiVend — API + UI
+# TriFiVend MVP
 
-## API (FastAPI on Fly.io)
+This repository contains a deliberately minimal implementation of the TriFiVend calling tool. The goal is to provide a working proof of concept without the layers of experimental agents and deployment scripts that previously cluttered the project.
 
-**Run local**
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.backend.txt
-cp .env.example .env   # fill in values
-python -m uvicorn main:app --host :: --port 8080
+## Project layout
+
+```
+backend/   # FastAPI application code
+ui/        # Vite + React front-end for triggering calls
+main.py    # Uvicorn entrypoint that exposes `backend.create_app`
 ```
 
-## Deployment Secrets Quickstart
+A lightweight JSON file in `data/calls.json` keeps track of every call request. The file is created automatically when the API boots.
 
-### Vercel (UI)
-1. Open **GitHub → Repo → Settings → Secrets and variables → Actions**.
-2. Add the following repository secrets for the Vercel integration:
-   - `VERCEL_TOKEN`
-   - `VERCEL_ORG_ID`
-   - `VERCEL_PROJECT_ID`
-3. In Vercel, link the project to the repository root so the provided `vercel.json` builds the `/ui` workspace.
+## Running the API locally
 
-### Fly.io (API)
-1. Generate a Fly access token (e.g. `fly auth token`).
-2. Store it as a GitHub repository secret named `FLY_API_TOKEN` **or** log in locally and run:
-   ```bash
-   fly auth token # prints token
-   ```
-   and then use it with CI or `flyctl`.
-3. Backend runtime configuration goes into Fly secrets or GitHub environment variables, for example:
-   ```bash
-   fly secrets set SUPABASE_URL=... SUPABASE_ANON_KEY=...
-   ```
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.backend.txt
+uvicorn main:app --reload
+```
 
-## One-Time Sanity Checklist
-- `fly apps list` → confirm `withai-callbot` (and `trifivend-ui` if you manage the UI app).
-- `flyctl deploy -c fly.api.toml` to ship the API.
-- Confirm Vercel is linked to the repo root so deploying the UI just works.
+Environment variables (optional but required for real phone calls):
 
-Need a production-ready Next.js `/ui` skeleton (landing + dashboard with SSE stream, call launcher form, shadcn/ui prewired)? Let me know and I can generate the full codebase.
+- `TWILIO_ACCOUNT_SID`
+- `TWILIO_AUTH_TOKEN`
+- `TWILIO_FROM_NUMBER`
+
+If these values are missing the API will still accept requests, but it will only record them locally instead of placing real calls.
+
+## Running the UI
+
+```bash
+cd ui
+npm install
+npm run dev
+```
+
+The development server assumes the API is available at `http://localhost:8000`. You can change this by updating the `API_BASE_URL` constant in `ui/src/api.ts`.
+
+## Tests
+
+```bash
+pytest
+```
+
+The tests cover the most important flows: creating calls, listing them, and updating their status.
