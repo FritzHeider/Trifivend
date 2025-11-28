@@ -1,1 +1,38 @@
-[]
+[
+  {
+    "id": "10b3d1db-bffb-441b-98b8-fe23ce0c7b9d",
+    "to_number": "+14159000557",
+    "message": "Hi! This is a TriFiVend MVP call.",
+    "status": "recorded",
+    "provider_sid": null,
+    "created_at": "2025-11-28T02:17:16.897597Z",
+    "updated_at": "2025-11-28T02:17:16.898845Z"
+  },
+  {
+    "id": "3940e1b3-8fbf-49ae-850f-21b5c80faa2f",
+    "to_number": "+15555550100",
+    "message": "Hi! This is a TriFiVend MVP call.",
+    "status": "recorded",
+    "provider_sid": null,
+    "created_at": "2025-11-28T02:17:33.620822Z",
+    "updated_at": "2025-11-28T02:17:33.621857Z"
+  },
+  {
+    "id": "91af12ff-d623-41d6-ad47-e9042a04797f",
+    "to_number": "+15555550100",
+    "message": "Hi! This is a TriFiVend MVP call.",
+    "status": "recorded",
+    "provider_sid": null,
+    "created_at": "2025-11-28T02:17:54.459497Z",
+    "updated_at": "2025-11-28T02:17:54.493110Z"
+  },
+  {
+    "id": "3e40d82f-6f12-42c5-ab0e-0c079c7451d1",
+    "to_number": "+15555550100",
+    "message": "Hi! This is a TriFiVend MVP call.",
+    "status": "recorded",
+    "provider_sid": null,
+    "created_at": "2025-11-28T02:20:43.196572Z",
+    "updated_at": "2025-11-28T02:20:43.201512Z"
+  }
+]
