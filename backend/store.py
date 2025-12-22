@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import heapq
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,9 +51,13 @@ class CallStore:
         payload = [record.model_dump(mode="json") for record in self._calls.values()]
         self._path.write_text(json.dumps(payload, indent=2), "utf-8")
 
-    def list_calls(self) -> List[CallRecord]:
+    def list_calls(self, *, limit: Optional[int] = None) -> List[CallRecord]:
         with self._lock:
-            return sorted(self._calls.values(), key=lambda c: c.created_at, reverse=True)
+            if limit is None:
+                return sorted(self._calls.values(), key=lambda c: c.created_at, reverse=True)
+            if limit <= 0:
+                return []
+            return heapq.nlargest(limit, self._calls.values(), key=lambda c: c.created_at)
 
     def add_call(self, record: CallRecord) -> CallRecord:
         with self._lock:

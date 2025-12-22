@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import ensure_data_directory, get_settings
@@ -57,8 +57,16 @@ def create_app() -> FastAPI:
         return request.app.state.twilio
 
     @app.get("/calls", response_model=CallList, summary="List recent calls")
-    async def list_calls(store: CallStore = Depends(get_store)) -> CallList:
-        calls = [CallRead.model_validate(call) for call in store.list_calls()]
+    async def list_calls(
+        limit: int | None = Query(
+            default=None,
+            ge=1,
+            le=500,
+            description="Optional limit for the number of most recent calls to return.",
+        ),
+        store: CallStore = Depends(get_store),
+    ) -> CallList:
+        calls = [CallRead.model_validate(call) for call in store.list_calls(limit=limit)]
         return CallList(calls=calls)
 
     @app.post(

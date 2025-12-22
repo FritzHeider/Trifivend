@@ -32,8 +32,9 @@ export async function createCall(payload: CreateCallPayload): Promise<CallRecord
   return response.json();
 }
 
-export async function fetchCalls(): Promise<CallRecord[]> {
-  const response = await fetch(`${API_BASE_URL}/calls`);
+export async function fetchCalls(limit: number = 20): Promise<CallRecord[]> {
+  const query = limit > 0 ? `?limit=${limit}` : "";
+  const response = await fetch(`${API_BASE_URL}/calls${query}`);
   if (!response.ok) {
     throw new Error("Failed to fetch calls");
   }

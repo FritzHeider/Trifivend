@@ -83,6 +83,12 @@ button:disabled {
   margin-top: 2.5rem;
 }
 
+.history .hint {
+  margin: 0.25rem 0 0.75rem;
+  color: #6b7280;
+  font-size: 0.95rem;
+}
+
 .history ul {
   list-style: none;
   padding: 0;

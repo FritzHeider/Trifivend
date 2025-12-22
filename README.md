@@ -12,6 +12,8 @@ main.py    # Uvicorn entrypoint that exposes `backend.create_app`
 
 A lightweight JSON file in `data/calls.json` keeps track of every call request. The file is created automatically when the API boots.
 
+The `GET /calls` endpoint accepts an optional `limit` query string (up to 500) to return only the most recent records (for example `/calls?limit=20`). This keeps responses fast even when the call log grows.
+
 ## Running the API locally
 
 ```bash
