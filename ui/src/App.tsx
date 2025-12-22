@@ -1,6 +1,8 @@
 import { FormEvent, useEffect, useState } from "react";
 import { CallRecord, createCall, fetchCalls } from "./api";
 
+const CALL_HISTORY_LIMIT = 20;
+
 export default function App() {
   const [toNumber, setToNumber] = useState("+15555550100");
   const [message, setMessage] = useState("Hi! This is a TriFiVend MVP call.");
@@ -15,7 +17,7 @@ export default function App() {
 
   async function loadCalls() {
     try {
-      const records = await fetchCalls();
+      const records = await fetchCalls(CALL_HISTORY_LIMIT);
       setCalls(records);
     } catch (error) {
       console.error(error);
@@ -80,6 +82,7 @@ export default function App() {
 
         <section className="history">
           <h2>Recent calls</h2>
+          <p className="hint">Showing your latest {CALL_HISTORY_LIMIT} calls.</p>
           {calls.length === 0 ? (
             <p>No calls yet.</p>
           ) : (

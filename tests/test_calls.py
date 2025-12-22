@@ -73,3 +73,17 @@ def test_update_status_changes_record():
     data = update_response.json()
     assert data["status"] == "completed"
     assert data["provider_sid"] == "CA123"
+
+
+def test_list_calls_can_be_limited():
+    client = create_client()
+    first = client.post("/calls", json={"to_number": "+15555550101", "message": "First"}).json()
+    second = client.post("/calls", json={"to_number": "+15555550102", "message": "Second"}).json()
+    third = client.post("/calls", json={"to_number": "+15555550103", "message": "Third"}).json()
+
+    response = client.get("/calls", params={"limit": 2})
+    assert response.status_code == 200
+    calls = response.json()["calls"]
+    assert len(calls) == 2
+    returned_ids = {call["id"] for call in calls}
+    assert returned_ids == {third["id"], second["id"]}
