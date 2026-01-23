@@ -3,5 +3,6 @@ uvicorn==0.32.0
 pydantic==2.11.7
 pydantic-settings==2.6.1
 python-dotenv==1.0.1
-twilio==9.2.3
+twilio==9.10.0
+openai==2.15.0
 httpx==0.27.2

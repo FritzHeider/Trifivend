@@ -28,6 +28,8 @@ Environment variables (optional but required for real phone calls):
 - `TWILIO_ACCOUNT_SID`
 - `TWILIO_AUTH_TOKEN`
 - `TWILIO_FROM_NUMBER`
+- `OPENAI_API_KEY` (if using OpenAI-powered call scripting)
+- `OPENAI_MODEL` (for example `gpt-4.1-mini`)
 
 If these values are missing the API will still accept requests, but it will only record them locally instead of placing real calls.
 
